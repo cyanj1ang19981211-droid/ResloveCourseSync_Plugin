@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>课程强度同步</title>
+<style>
+  :root {
+    --bg: #14161a;
+    --panel: #1d2027;
+    --border: #2a2e37;
+    --text: #e8eaed;
+    --muted: #9aa0a6;
+    --accent: #4da3ff;
+    --green: #3ddc84;
+    --red: #ff6b6b;
+    --amber: #ffb347;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  body { padding: 12px; }
+
+  .header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+  .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--muted);
+    flex-shrink: 0;
+  }
+  .dot.on { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .header .title { font-size: 12px; font-weight: 600; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  .segment {
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    color: var(--accent);
+    min-height: 28px;
+    line-height: 1.2;
+  }
+  .segment.empty { color: var(--muted); }
+
+  .subline {
+    font-size: 12px;
+    color: var(--muted);
+    min-height: 18px;
+    margin-bottom: 8px;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+  .keyword-tag {
+    background: var(--amber);
+    color: #1a1204;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 1px 7px;
+    border-radius: 10px;
+  }
+
+  .metrics {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+  .metric {
+    flex: 1 1 auto;
+    min-width: 90px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 7px 10px;
+  }
+  .metric .label {
+    font-size: 11px;
+    color: var(--muted);
+    margin-bottom: 1px;
+  }
+  .metric .value {
+    font-size: 21px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.1;
+  }
+  .metric .unit { font-size: 11px; color: var(--muted); margin-left: 2px; }
+
+  .curve-box {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px;
+  }
+  .curve-box .caption {
+    font-size: 10px;
+    color: var(--muted);
+    margin-bottom: 4px;
+    display: flex;
+    gap: 12px;
+  }
+  .legend { display: flex; align-items: center; gap: 4px; }
+  .legend .swatch { width: 10px; height: 3px; border-radius: 2px; display: inline-block; }
+  canvas { width: 100%; height: 80px; display: block; }
+
+  .status {
+    margin-top: 8px;
+    font-size: 11px;
+    color: var(--muted);
+    min-height: 15px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .mode {
+    margin-top: 2px;
+    font-size: 10px;
+    color: var(--muted);
+    min-height: 14px;
+    font-family: "Consolas", monospace;
+  }
+</style>
+</head>
+<body>
+  <div class="header">
+    <span class="dot" id="dot"></span>
+    <span class="title" id="title">课程强度同步</span>
+  </div>
+
+  <div class="segment empty" id="segment">— 等待同步 —</div>
+
+  <div class="subline">
+    <span id="action"></span>
+    <span class="keyword-tag" id="keyword" style="display:none"></span>
+  </div>
+
+  <div class="metrics" id="metrics"></div>
+
+  <div class="curve-box">
+    <div class="caption">
+      <span class="legend" id="mainLegend" style="display:none"><span class="swatch" style="background:var(--accent)"></span><span id="mainLegendLabel"></span></span>
+      <span class="legend" id="subLegend" style="display:none"><span class="swatch" style="background:var(--amber)"></span><span id="subLegendLabel"></span></span>
+    </div>
+    <canvas id="curve"></canvas>
+  </div>
+
+  <div class="status" id="status">正在连接服务...</div>
+  <div class="mode" id="mode"></div>
+
+<script>
+const API = "http://127.0.0.1:8765/state";
+
+let el = {
+  dot: document.getElementById("dot"),
+  title: document.getElementById("title"),
+  segment: document.getElementById("segment"),
+  action: document.getElementById("action"),
+  keyword: document.getElementById("keyword"),
+  metrics: document.getElementById("metrics"),
+  curve: document.getElementById("curve"),
+  status: document.getElementById("status"),
+  mode: document.getElementById("mode"),
+  mainLegend: document.getElementById("mainLegend"),
+  subLegend: document.getElementById("subLegend"),
+  mainLegendLabel: document.getElementById("mainLegendLabel"),
+  subLegendLabel: document.getElementById("subLegendLabel"),
+};
+
+// 数值格式化：整数显示整数，小数保留 1 位
+function fmt(v) {
+  if (typeof v === "number") {
+    let r = Math.round(v * 10) / 10;
+    return Number.isInteger(r) ? String(r) : r.toFixed(1);
+  }
+  return v;
+}
+
+function renderMetrics(values, fieldMeta) {
+  el.metrics.innerHTML = "";
+  if (!fieldMeta || fieldMeta.length === 0) return;
+  for (const fm of fieldMeta) {
+    const raw = values[fm.key];
+    if (raw === undefined || raw === null) continue;
+    const card = document.createElement("div");
+    card.className = "metric";
+    card.innerHTML =
+      '<div class="label">' + fm.label + '</div>' +
+      '<div class="value">' + fmt(raw) + '<span class="unit">' + (fm.unit || "") + '</span></div>';
+    el.metrics.appendChild(card);
+  }
+}
+
+function drawCurve(curve, timeNow) {
+  const canvas = el.curve;
+  const ctx = canvas.getContext("2d");
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, w, h);
+
+  const times = curve.times || [];
+  const main = curve.main || [];
+  const sub = curve.sub || [];
+  const hasMain = curve.main_label && main.some(v => v !== null && v !== undefined);
+  const hasSub = curve.sub_label && sub.some(v => v !== null && v !== undefined);
+
+  el.mainLegend.style.display = hasMain ? "" : "none";
+  el.subLegend.style.display = hasSub ? "" : "none";
+  if (hasMain) el.mainLegendLabel.textContent = curve.main_label;
+  if (hasSub) el.subLegendLabel.textContent = curve.sub_label;
+
+  if (times.length < 2) return;
+  const t0 = times[0], t1 = times[times.length - 1];
+  const x = t => (t - t0) / (t1 - t0) * w;
+
+  // 主曲线（速度/踏频/桨频），null 视为 0（停止）
+  if (hasMain) {
+    const vals = main.map(v => (v === null || v === undefined) ? 0 : v);
+    let mn = Math.min(...vals), mx = Math.max(...vals);
+    if (mn === mx) { mn -= 1; mx += 1; }
+    const y = v => 4 + (mx - v) / (mx - mn) * (h - 8);
+    ctx.beginPath();
+    ctx.moveTo(x(times[0]), y(vals[0]));
+    for (let i = 1; i < times.length; i++) ctx.lineTo(x(times[i]), y(vals[i]));
+    ctx.strokeStyle = "#4da3ff";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+
+  // 副曲线（坡度/阻力），null 视为 0
+  if (hasSub) {
+    const vals = sub.map(v => (v === null || v === undefined) ? 0 : v);
+    let mn = Math.min(...vals), mx = Math.max(...vals);
+    if (mn === mx) { mn -= 1; mx += 1; }
+    const y = v => 4 + (mx - v) / (mx - mn) * (h - 8);
+    ctx.beginPath();
+    ctx.moveTo(x(times[0]), y(vals[0]));
+    for (let i = 1; i < times.length; i++) ctx.lineTo(x(times[i]), y(vals[i]));
+    ctx.strokeStyle = "#ffb347";
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+
+  // 播放头位置竖线
+  if (timeNow !== null && timeNow !== undefined) {
+    const px = x(Math.min(Math.max(timeNow, t0), t1));
+    ctx.beginPath();
+    ctx.moveTo(px, 0);
+    ctx.lineTo(px, h);
+    ctx.strokeStyle = "rgba(255,255,255,0.5)";
+    ctx.lineWidth = 1;
+    ctx.setLineDash([3, 3]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+}
+
+// fetch 超时（毫秒）：fusionscript 的 native 调用会阻塞 GIL，HTTP 可能短暂卡住，
+// 给客户端加超时避免一直转圈
+const FETCH_TIMEOUT_MS = 3000;
+
+// 连续失败计数：只有连续失败 >= 2 次才把 status 切换为"同步中断"，
+// 避免 fusionscript 短暂卡顿导致的"无法连接"提示闪烁
+let failStreak = 0;
+
+async function poll() {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const r = await fetch(API, { cache: "no-store", signal: ctrl.signal });
+    const s = await r.json();
+    clearTimeout(timer);
+    failStreak = 0;
+
+    el.dot.className = "dot" + (s.connected ? " on" : "");
+
+    if (s.course_loaded) {
+      el.title.textContent = (s.title || s.course_name) + " · " + s.timeline_name;
+      el.segment.textContent = s.segment || "—";
+      el.segment.className = "segment" + (s.segment ? "" : " empty");
+      el.action.textContent = s.action || "";
+      if (s.keyword) {
+        el.keyword.style.display = "";
+        el.keyword.textContent = s.keyword;
+      } else {
+        el.keyword.style.display = "none";
+      }
+      renderMetrics(s.values, s.field_meta);
+      drawCurve(s.curve, s.time_seconds);
+      // 显示 worker 模式（直传/外推/封顶），便于诊断"播放不前进"是不是 worker 端卡住
+      const mode = s.mode || "?";
+      const modeIcon = mode === "raw" ? "●" : mode === "外推" ? "◐" : "○";
+      const modeColor = mode === "raw" ? "var(--green)" : mode === "外推" ? "var(--amber)" : "var(--muted)";
+      el.status.textContent = "已同步 · " + formatTime(s.time_seconds);
+      el.mode.textContent = modeIcon + " " + mode;
+      el.mode.style.color = modeColor;
+    } else {
+      el.title.textContent = "课程强度同步";
+      el.segment.textContent = "— 等待同步 —";
+      el.segment.className = "segment empty";
+      el.action.textContent = "";
+      el.keyword.style.display = "none";
+      el.metrics.innerHTML = "";
+      drawCurve({ times: [], main: [], sub: [], main_label: "", sub_label: "" }, null);
+      el.status.textContent = s.message || "未同步";
+      el.mode.textContent = "";
+    }
+  } catch (e) {
+    clearTimeout(timer);
+    failStreak += 1;
+    el.dot.className = "dot";
+    if (failStreak >= 2) {
+      el.status.textContent = "同步中断，正在重连…";
+    }
+    // 失败时不清空已显示的数据（让画面保持上次状态，避免闪烁）
+  }
+}
+
+function formatTime(sec) {
+  sec = Math.max(0, Math.floor(sec));
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  const pad = n => String(n).padStart(2, "0");
+  return pad(m) + ":" + pad(s);
+}
+
+poll();
+setInterval(poll, 150);
+</script>
+</body>
+</html>

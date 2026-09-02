@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# 虚拟环境
+venv/
+.venv/
+env/
+
+# IDE / 编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 系统文件
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# 本地配置（含本机达芬奇脚本路径等，不应提交）
+config.local.json
+
+# 日志 / 缓存
+*.log
+*.tmp
+*.cache
+
+# 探针诊断脚本（临时调试用，非正式功能）
+probe_raw.py
+
+# 课程数据（核心业务数据，禁止提交/上传）
+data/
+*.xlsx

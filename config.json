@@ -1,0 +1,7 @@
+{
+  "resolve_script_path": null,
+  "resolve_script_lib": null,
+  "data_dir": "data",
+  "port": 8765,
+  "poll_interval": 0.1
+}
