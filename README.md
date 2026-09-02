@@ -1,152 +1,166 @@
-# 课程强度同步插件（DaVinci Resolve 辅助剪辑）
+# Course Intensity Sync Plugin (DaVinci Resolve Editing Assistant)
 
-让剪辑师在达芬奇时间线上拖动播放头时，**实时看到当前时间点对应课件的运动强度信息**——环节名称、动作、强度关键词、速度/配速/坡度（按器械自动调整）——从而根据课程当前强度自主决定切镜节奏。
+A helper tool for video editors working in DaVinci Resolve: while scrubbing or playing the timeline, it shows **real-time exercise-intensity information for the course segment at the current playhead position** — segment name, movement/action, intensity keywords, and equipment-specific metrics (speed/pace/incline) — so editors can decide cut pacing based on the course's current intensity.
 
-## 它能做什么
+> English README. For the Chinese version, see [README.zh-CN.md](README.zh-CN.md).
 
-- 读取达芬奇当前播放头时间码，**自动跟随**（拖动 / 播放时毫秒级刷新）。
-- 根据**当前时间线名称**自动匹配**同名课程数据文件**。
-- 在**始终置顶的暗色小窗**里显示：
-  - 当前**课程环节**（如「快速跑」「动作教学1」）
-  - 当前**动作名称**（如「慢跑」「中速跑」）+ **强度关键词**（如「有氧输出」「持续消耗」）
-  - 当前**强度指标**（速度/配速/坡度，按器械类型自动调整）
-  - 整节课的强度曲线 + 当前播放头位置竖线
+## What It Does
 
-## 架构
+- Reads DaVinci Resolve's current playhead timecode and **follows it automatically** (refreshes on scrub / play).
+- Automatically matches a **course data file by the current timeline name**.
+- Shows in an **always-on-top dark overlay window**:
+  - The current **course segment** (e.g. "Fast Run", "Movement Tutorial 1")
+  - The current **movement/action** (e.g. "Jog", "Tempo Run") + **intensity keywords** (e.g. "Aerobic Output", "Sustained Burn")
+  - The current **intensity metrics** (speed / pace / incline, auto-adjusted by equipment type)
+  - The full-course intensity curve with a vertical line at the current playhead
+
+## Architecture
 
 ```
-达芬奇 (Scripting API)
+DaVinci Resolve (Scripting API)
         │  GetCurrentTimecode() / GetCurrentTimeline().GetName()
         ▼
-server.py  ── 轮询时间码 → 匹配课程数据 → 换算当前强度
-        │  (本地 HTTP, 127.0.0.1:8765)
+server.py  ── polls timecode → matches course data → computes current intensity
+        │  (local HTTP, 127.0.0.1:8765)
         ▼
-overlay.html  ── 暗色悬浮窗，实时渲染
+overlay.html  ── dark overlay window, real-time rendering
 ```
 
-| 文件 | 作用 |
+| File | Purpose |
 |---|---|
-| `server.py` | 后端：连达芬奇 + 轮询时间码 + 匹配课程 + 本地 HTTP |
-| `resolve_connection.py` | 封装达芬奇 Scripting API |
-| `course_data.py` | 课程数据加载 + 按时间阶梯查询 |
-| `equipment_config.py` | 器械字段配置（跑步机/单车/划船机/椭圆机/徒手） |
-| `overlay.html` / `overlay.py` | 暗色悬浮窗 + 启动器 |
-| `xlsx_to_json.py` | **把课件 xlsx 自动转成插件 JSON** |
-| `start.bat` | 一键启动后端 + 悬浮窗 |
-| `config.json` | 配置（端口、数据目录、达芬奇脚本路径） |
-| `data/` | 课程 JSON 数据（已含 21 节器械类课程） |
+| `server.py` | Backend: connects to Resolve + polls timecode + matches course + local HTTP server |
+| `resolve_connection.py` | Wrapper around the DaVinci Resolve Scripting API |
+| `course_data.py` | Course data loading + stepped (time-based) queries |
+| `equipment_config.py` | Equipment field configuration (treadmill / bike / rower / elliptical / bodyweight) |
+| `overlay.html` / `overlay.py` | Dark overlay window + launcher |
+| `xlsx_to_json.py` | **Converts course `.xlsx` files into plugin JSON** |
+| `start.bat` | One-click startup for backend + overlay |
+| `config.json` | Configuration (port, data dir, Resolve scripting path) |
+| `data/` | Course JSON data (private; not version-controlled) |
 
-## 环境要求
+## Requirements
 
-- Windows + DaVinci Resolve（Studio 或免费版均可，需支持 Scripting API）。
-- Python 3.7+。
-- 无需第三方 Python 库（纯标准库实现）。
+- Windows + DaVinci Resolve (Studio or Free, with Scripting API support).
+- Python 3.7+.
+- No third-party Python packages required (pure standard library).
 
-## 使用步骤
+## Usage
 
-### 1. 开启达芬奇外部脚本
+### 1. Enable Resolve External Scripting
 
-达芬奇菜单：**DaVinci Resolve → 偏好设置 → 系统 → 常规**，把
-**"External scripting using"** 设为 **Local**（或 Network），重启达芬奇。
+In Resolve: **DaVinci Resolve → Preferences → System → General**, set
+**"External scripting using"** to **Local** (or Network), then restart Resolve.
 
-### 2. 准备课程数据（两种方式）
+### 2. Prepare Course Data (two ways)
 
-**方式 A（推荐）：直接转换课件 xlsx**
+**Method A (recommended): convert the course `.xlsx` directly**
 
 ```bat
-python xlsx_to_json.py "C:\path\to\冠军课程课件.xlsx"
+python xlsx_to_json.py "C:\path\to\course.xlsx"
 ```
 
-脚本会解析所有器械类课件表，生成对应 JSON 到 `data/` 目录。
-（跑步机/单车/划船机/椭圆机已支持；徒手类课件结构不同，暂未自动转换。）
+The script parses all equipment-based course sheets and generates corresponding JSON into the `data/` directory.
+(Treadmill / bike / rower / elliptical are supported; bodyweight courses have a different structure and are not auto-converted yet.)
 
-**方式 B：手写 JSON**（格式见下文「数据格式」）。
+**Method B: hand-write JSON** (format below).
 
-关键点：JSON 里的 **`course_name` 字段必须和达芬奇时间线名称一致**（或互为包含），插件按名称自动匹配。
+Key point: the JSON's **`course_name` field must match the DaVinci timeline name** (or contain it); the plugin matches by name automatically.
 
-### 3. 启动
+### 3. Start
 
-双击 **`start.bat`**（一键启动后端 + 悬浮窗）。
+Double-click **`start.bat`** (starts backend + overlay in one click).
 
-或手动分两步：
+Or manually, in two steps:
 ```bat
-python server.py     # 启动后端
-python overlay.py    # 启动悬浮窗
+python server.py     # start backend
+python overlay.py    # start overlay
 ```
 
-### 4. 使用
+### 4. Use
 
-- 在达芬奇里打开与课程同名的时间线，拖动播放头，悬浮窗即实时显示当前强度。
-- 悬浮窗默认用 Edge 的 `--app` 模式打开（无边框小窗）。
-- 需要「始终置顶」时，可用 **Microsoft PowerToys → Always On Top**（Win+Ctrl+T）或任意置顶工具。
+- In Resolve, open a timeline named the same as the course, scrub the playhead, and the overlay shows the current intensity in real time.
+- The overlay opens in Edge's `--app` mode (frameless small window) by default.
+- For "always on top", use **Microsoft PowerToys → Always On Top** (Win+Ctrl+T) or any window-pinning tool.
 
-## 配置（config.json）
+## Configuration (`config.json`)
 
-| 键 | 说明 | 默认 |
+| Key | Description | Default |
 |---|---|---|
-| `resolve_script_path` | 达芬奇 scripting 模块路径（留空自动探测） | `null` |
-| `data_dir` | 课程数据目录 | `data` |
-| `port` | 本地服务端口 | `8765` |
-| `poll_interval` | 轮询间隔（秒） | `0.1` |
+| `resolve_script_path` | Path to the Resolve scripting module (empty = auto-detect) | `null` |
+| `data_dir` | Course data directory | `data` |
+| `port` | Local server port | `8765` |
+| `poll_interval` | Polling interval (seconds) | `0.1` |
 
-达芬奇 scripting 模块常见位置：
+The Resolve scripting module is commonly located at:
 ```
 C:\ProgramData\Blackmagic Design\DaVinci Resolve\Support\Developer\Scripting\Modules
 ```
-若自动探测失败，把它填进 `resolve_script_path`。
+If auto-detection fails, set `resolve_script_path` to this path.
 
-## 数据格式
+## Data Format
 
 ```json
 {
-  "course_name": "跑步机-进阶跑姿训练",   // 必须与达芬奇时间线名一致
-  "title": "进阶跑姿训练",                // 课程主题（悬浮窗显示用，可选）
-  "equipment": "treadmill",              // 器械类型，见 equipment_config.py
-  "duration": 1050,                      // 总时长（秒）
-  "segments": [                          // 课程环节（时间升序）
-    { "name": "热身激活", "start": 60,  "end": 170 },
-    { "name": "快速跑",   "start": 680, "end": 800 }
+  "course_name": "Treadmill - Advanced Running Form",  // must match the timeline name
+  "title": "Advanced Running Form",                      // course topic (shown in overlay, optional)
+  "equipment": "treadmill",                              // equipment type, see equipment_config.py
+  "duration": 1050,                                      // total duration (seconds)
+  "segments": [                                          // course segments (ascending by time)
+    { "name": "Warm Up", "start": 60,  "end": 170 },
+    { "name": "Fast Run", "start": 680, "end": 800 }
   ],
-  "points": [                            // 各环节起点处的强度数据（分段恒定）
-    { "time": 60,  "speed": 2, "pace": "30:00", "action": "机上热身" },
-    { "time": 170, "speed": 8, "pace": "7:30",  "action": "慢跑", "keyword": "有氧输出" }
+  "points": [                                            // intensity data at segment start points (constant within a segment)
+    { "time": 60,  "speed": 2, "pace": "30:00", "action": "Warm Up on Machine" },
+    { "time": 170, "speed": 8, "pace": "7:30",  "action": "Jog", "keyword": "Aerobic Output" }
   ]
 }
 ```
 
-**关键规则：**
-- `time` 单位是**秒**（从课程开始算）。
-- 健身课件的强度在「一个环节内恒定」，所以 `points` 只需在每个环节起点记录一次；
-  查询时取「最后一个 time <= t 的点」（阶梯查询）。
-- `speed` / `incline` / `distance` 等数值字段，值为 `null` 表示该环节无此指标
-  （如冷身/拉伸环节没有跑步机速度），前端显示 "—"。
-- `pace` 配速用 `"mm:ss"` 字符串，由速度自动换算（8 km/h = "7:30"）。
-- `action`（动作名称）、`keyword`（强度标签）为可选文本字段。
-- **可选字段**：课程数据里没有的字段（如跑步机不带坡度）会自动隐藏。
+**Key rules:**
+- `time` is in **seconds** (from course start).
+- Fitness-course intensity is **constant within a segment**, so `points` only records once at each segment's start; queries take the last point where `time <= t` (stepped query).
+- Numeric fields like `speed` / `incline` / `distance` are `null` when the segment has no such metric (e.g. cool-down / stretching has no treadmill speed); the overlay shows "—".
+- `pace` is a `"mm:ss"` string, converted from speed (8 km/h = "7:30").
+- `action` (movement name) and `keyword` (intensity tag) are optional text fields.
+- **Optional fields**: fields absent from course data (e.g. a treadmill course without incline) are hidden automatically.
 
-## 支持多器械（可扩展）
+## Supported Equipment (extensible)
 
-`equipment_config.py` 里已内置多种器械的字段定义，后续加新器械只需加一个条目：
+`equipment_config.py` ships with several equipment field definitions; to add a new equipment type, just add one entry:
 
-| 器械 key | 名称 | 字段 |
+| Equipment key | Name | Fields |
 |---|---|---|
-| `treadmill` | 跑步机 | 速度 km/h · 配速 · 坡度 % · 距离 |
-| `bike` | 动感单车 | 踏频 rpm · 阻力 · 功率 |
-| `rower` | 划船机 | 桨频 spm · 阻力 · 配速 |
-| `elliptical` | 椭圆机 | 转速 rpm · 阻力 |
-| `bodyweight` | 徒手 | （无器械指标，仅动作/环节） |
+| `treadmill` | Treadmill | speed km/h · pace · incline % · distance |
+| `bike` | Spin Bike | cadence rpm · resistance · power |
+| `rower` | Rowing Machine | stroke rate spm · resistance · split pace |
+| `elliptical` | Elliptical | rotation rpm · resistance |
+| `bodyweight` | Bodyweight | (no equipment metrics; action/segment only) |
 
-**真实课件字段映射**（来自「冠军课程课件.xlsx」）：
-- 跑步机 D 列「建议速度(km/h)」→ `speed`，E 列「建议阻力/坡度」→ `incline`
-- 单车 D 列「RPM」→ `rpm`，E 列「阻力」→ `resistance`
-- 划船机 D 列「SPM」→ `spm`，E 列「阻力」→ `resistance`
+**Real course-field mapping** (from the original `冠军课程课件.xlsx`):
+- Treadmill: col D "建议速度(km/h)" → `speed`, col E "建议阻力/坡度" → `incline`
+- Bike: col D "RPM" → `rpm`, col E "阻力" → `resistance`
+- Rower: col D "SPM" → `spm`, col E "阻力" → `resistance`
 
-已随项目转换 21 节器械类课程（跑步机 10 / 单车 5 / 划船机 3 / 椭圆机 3）。
+## FAQ
 
-## 常见问题
+- **Overlay shows "cannot connect to service"**: run `server.py` first.
+- **Status stuck on "connecting to Resolve"**: make sure Resolve is running and external scripting is set to Local.
+- **Cannot find a matching course**: check that `course_name` matches the timeline name (or contains it).
+- **Window won't stay on top**: Edge `--app` mode doesn't guarantee top-most; use PowerToys' Always On Top shortcut.
+- **Bodyweight courses not converted**: bodyweight training counts "reps", has no equipment metrics, and its timeline is incomplete, so it isn't auto-converted yet and needs a separate design.
 
-- **悬浮窗显示「无法连接服务」**：先运行 `server.py`。
-- **状态一直「正在连接达芬奇」**：确认达芬奇已启动、外部脚本已开启为 Local。
-- **找不到同名课程**：检查 `course_name` 与时间线名称是否一致（或互为包含）。
-- **窗口不置顶**：Edge `--app` 模式本身不保证置顶，用 PowerToys 的 Always On Top 快捷键。
-- **徒手类课件未转换**：徒手训练按「个数」计数、无器械指标且时间轴不完整，暂不支持自动转换，需另行设计。
+## Versioning
+
+This project follows [Semantic Versioning](https://semver.org/).
+
+- **v0.1.0** — Initial release: equipment-based course adaptation (treadmill / bike / rower / elliptical / bodyweight) + basic overlay.
+
+## Roadmap
+
+- **Multi-language course adaptation** — configurable header/label detection and equipment-name prefix matching for non-Chinese course files.
+- **Bodyweight course adaptation** — a dedicated data model for rep/set-based training (no equipment metrics, non-continuous timeline).
+- **Frontend polish + course cache invalidation** — in-memory course caching, `data/` reload, and a "clear cache" endpoint.
+
+## License
+
+Proprietary. All rights reserved. Course data (`data/`) is confidential business data and is intentionally excluded from version control.
