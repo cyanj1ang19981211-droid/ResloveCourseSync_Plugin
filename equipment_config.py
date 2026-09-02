@@ -68,6 +68,22 @@ EQUIPMENTS = {
     "bodyweight": {
         "name": "徒手",
         "fields": [],
+        # 复合动作：同时涉及 3 个及以上关节、全身调度大的徒手动作（强度较高）。
+        # 徒手课没有速度/坡度/阻力等数值指标，强度靠「动作类型」区分：
+        #   动作名命中本列表 → 复合动作（高强度）
+        #   未命中 → 孤立/局部动作（低强度，如拉伸、卷腹、平板支撑、俯卧撑等）
+        # 判断函数见 is_compound_action()。
+        "compound_actions": [
+            # —— 跳跃爆发类（下肢多关节 + 核心 + 心肺）——
+            "波比跳", "立卧撑", "深蹲跳", "抱膝跳", "屈膝跳",
+            "箭步蹲跳", "跳跃箭步蹲", "弓步跳", "青蛙跳",
+            # —— 全身协调类 ——
+            "开合跳", "星星跳", "海星跳", "滑冰跳", "侧向跳",
+            # —— 俯撑动态类（核心 + 肩髋膝联动）——
+            "登山跑", "高抬腿", "熊爬", "蜘蛛俯卧撑", "平板支撑开合跳",
+            # —— 组合 / 进阶全身类 ——
+            "深蹲推举", "土耳其起立",
+        ],
     },
 }
 
@@ -89,6 +105,37 @@ def get_field_order(eq_type: str):
     if not eq:
         return []
     return sorted(eq["fields"], key=lambda f: f["priority"])
+
+
+def is_compound_action(eq_type: str, action_name: str) -> bool:
+    """判断某动作是否为「复合动作」（涉及 3 个及以上关节、全身调度大）。
+
+    徒手课强度判断依据：
+        - 复合动作 → 高强度（全身动员、心肺负荷大）
+        - 非复合动作 → 低强度（孤立/局部，如拉伸、卷腹等）
+
+    匹配采用「精确匹配」或「复合词是动作名的子串」（即 c in name），
+    这样能兼容动作变体（"简易波比跳"、"波比跳变式"、"慢速登山跑"），
+    同时不会把复合动作的子串误判为复合动作（如"俯卧撑"不该因
+    "蜘蛛俯卧撑"命中、"平板支撑"不该因"平板支撑开合跳"命中）。
+
+    参数：
+        eq_type     : 器械类型 key（如 "bodyweight"）
+        action_name : 动作名称（来自课程数据 point 的 action 字段）
+    返回：
+        True 表示复合动作；False 表示非复合动作或参数无效。
+    """
+    eq = get_equipment(eq_type)
+    if not eq:
+        return False
+    if not action_name:
+        return False
+    name = str(action_name).strip()
+    compounds = eq.get("compound_actions", [])
+    for c in compounds:
+        if name == c or c in name:
+            return True
+    return False
 
 
 def detect_equipment(sheet_name: str) -> str:
