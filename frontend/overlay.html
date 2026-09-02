@@ -335,10 +335,10 @@ async function poll() {
       } else {
         el.remaining.textContent = "";
       }
-      // 下一环节预告
-      if (s.next_segment && s.next_segment.name) {
-        const until = (s.next_segment.start || 0) - (s.time_seconds || 0);
-        el.next.innerHTML = '下一环节 <span class="next-name">' + s.next_segment.name + '</span> · ' + formatTime(Math.max(0, until)) + ' 后';
+      // 下一小环节预告（point 粒度，比 segment 粒度更细，能看到间歇组里每段冲刺/恢复）
+      if (s.next_step && s.next_step.name) {
+        const until = (s.next_step.start || 0) - (s.time_seconds || 0);
+        el.next.innerHTML = '下一小环节 <span class="next-name">' + s.next_step.name + '</span> · ' + formatTime(Math.max(0, until)) + ' 后';
       } else {
         el.next.textContent = "";
       }

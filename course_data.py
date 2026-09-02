@@ -116,6 +116,26 @@ class CourseData:
                 }
         return None
 
+    def next_point_at(self, t: float) -> dict:
+        """返回时刻 t 之后第一个含 action 或 keyword 的 point 信息；没有则 None。
+
+        返回：{"name" (action), "keyword", "start" (time 秒)}。
+
+        与 next_segment_at 的区别：segment 是粗粒度大环节（例如「间歇组」可能
+        持续 10 分钟包含 5 组冲刺+恢复），而 point 是细粒度采样点（每 30~60s
+        一个动作/强度变化）。间歇训练中需要在「下一小环节」粒度上做预告，
+        才能看到「冲刺 → 轻松跑 → 节奏跑 ...」的真实小节切换。
+        """
+        for p in self.points:
+            pt = float(p.get(TIME_KEY, 0))
+            if pt > t and (ACTION_KEY in p or KEYWORD_KEY in p):
+                return {
+                    "name": p.get(ACTION_KEY, "") or "",
+                    "keyword": p.get(KEYWORD_KEY, "") or "",
+                    "start": pt,
+                }
+        return None
+
     def action_at(self, t: float) -> str:
         """返回时刻 t 的动作名称；无则空字符串。"""
         p = self._point_at(t)

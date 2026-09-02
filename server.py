@@ -67,7 +67,7 @@ class State:
         self.keyword = ""
         self.values = {}            # {field_key: display_value}
         self.segment_remaining = 0.0   # 当前环节剩余秒数（end - t）
-        self.next_segment = None       # 下一环节信息 {"name","start","end"}，无则 None
+        self.next_step = None           # 下一个小动作信息 {"name","keyword","start"}，无则 None
         self.time_seconds = 0.0
         self.connected = False
         self.message = "正在连接达芬奇..."
@@ -94,7 +94,7 @@ class State:
                 "keyword": self.keyword,
                 "values": dict(self.values),
                 "segment_remaining": self.segment_remaining,
-                "next_segment": self.next_segment,
+                "next_step": self.next_step,
                 "time_seconds": self.time_seconds,
                 "message": self.message,
                 "mode": self.mode,
@@ -384,7 +384,7 @@ def resolve_loop():
                 keyword="",
                 values={},
                 segment_remaining=0.0,
-                next_segment=None,
+                next_step=None,
                 message=("未找到同名课程数据" if tl_name else "当前无时间线") + "（数据目录见 config.json）",
             )
         else:
@@ -402,7 +402,7 @@ def resolve_loop():
 
             seg_info = course.segment_info_at(t)
             segment_remaining = seg_info["remaining"] if seg_info else 0.0
-            next_segment = course.next_segment_at(t)
+            next_step = course.next_point_at(t)
 
             field_meta = [
                 {"key": f["key"], "label": f["label"], "unit": f["unit"]}
@@ -420,7 +420,7 @@ def resolve_loop():
                 keyword=keyword,
                 values=values,
                 segment_remaining=segment_remaining,
-                next_segment=next_segment,
+                next_step=next_step,
                 time_seconds=t,
                 mode=mode,
                 field_meta=field_meta,
