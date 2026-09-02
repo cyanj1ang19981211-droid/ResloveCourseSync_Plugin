@@ -8,13 +8,16 @@ for /f "tokens=5" %%a in ('netstat -aon ^| findstr ":8765" ^| findstr "LISTENING
     taskkill /F /PID %%a >nul 2>nul
 )
 
-rem ===== 自动定位 Python 解释器（绝对路径优先，避免 PATH 依赖） =====
+rem ===== 自动定位 Python 解释器（可移植：不再写死本机用户路径） =====
+rem 达芬奇 fusionscript 仅兼容 Python 3.10 / 3.11，因此优先找 3.11，其次 3.10。
 set "PY="
-if exist "C:\Users\M0769\.workbuddy\binaries\python\versions\3.11.9\python.exe" set "PY=C:\Users\M0769\.workbuddy\binaries\python\versions\3.11.9\python.exe"
-if exist "C:\Users\M0769\.workbuddy\binaries\python\versions\3.13.12\python.exe" set "PY=C:\Users\M0769\.workbuddy\binaries\python\versions\3.13.12\python.exe"
-if "%PY%"=="" if exist "%LocalAppData%\Programs\Python\Python314\python.exe" set "PY=%LocalAppData%\Programs\Python\Python314\python.exe"
+rem 1) 通过 py 启动器按版本精确查找（最可靠）
+for /f "delims=" %%v in ('py -3.11 -c "import sys;print(sys.executable)" 2^>nul') do if not "%%v"=="" set "PY=%%v"
+if "%PY%"=="" for /f "delims=" %%v in ('py -3.10 -c "import sys;print(sys.executable)" 2^>nul') do if not "%%v"=="" set "PY=%%v"
+rem 2) 回退：系统 PATH 里的 python（若恰好是 3.10/3.11 也可用）
 if "%PY%"=="" where python >nul 2>nul && set "PY=python"
-if "%PY%"=="" where py >nul 2>nul && set "PY=py"
+rem 3) 最后回退：py 启动器默认版本
+if "%PY%"=="" where py >nul 2>nul && set "PY=py -3"
 
 if "%PY%"=="" (
     echo [错误] 未找到 Python，请先安装 Python 3.x

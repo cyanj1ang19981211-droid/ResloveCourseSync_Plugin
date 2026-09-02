@@ -2,13 +2,12 @@
 title 课件数据转换
 cd /d "%~dp0"
 
-rem ===== 自动定位 Python =====
+rem ===== 自动定位 Python（可移植：不再写死本机用户路径） =====
 set "PY="
-if exist "C:\Users\M0769\.workbuddy\binaries\python\versions\3.11.9\python.exe" set "PY=C:\Users\M0769\.workbuddy\binaries\python\versions\3.11.9\python.exe"
-if exist "C:\Users\M0769\.workbuddy\binaries\python\versions\3.13.12\python.exe" set "PY=C:\Users\M0769\.workbuddy\binaries\python\versions\3.13.12\python.exe"
-if "%PY%"=="" if exist "%LocalAppData%\Programs\Python\Python314\python.exe" set "PY=%LocalAppData%\Programs\Python\Python314\python.exe"
+for /f "delims=" %%v in ('py -3.11 -c "import sys;print(sys.executable)" 2^>nul') do if not "%%v"=="" set "PY=%%v"
+if "%PY%"=="" for /f "delims=" %%v in ('py -3.10 -c "import sys;print(sys.executable)" 2^>nul') do if not "%%v"=="" set "PY=%%v"
 if "%PY%"=="" where python >nul 2>nul && set "PY=python"
-if "%PY%"=="" where py >nul 2>nul && set "PY=py"
+if "%PY%"=="" where py >nul 2>nul && set "PY=py -3"
 
 if "%PY%"=="" (
     echo [错误] 未找到 Python，请先安装 Python 3.x

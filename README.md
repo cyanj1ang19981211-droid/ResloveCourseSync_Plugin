@@ -41,7 +41,7 @@ overlay.html  ── dark overlay window, real-time rendering
 ## Requirements
 
 - Windows + DaVinci Resolve (Studio or Free, with Scripting API support).
-- Python 3.7+.
+- Python **3.10 or 3.11** (required — DaVinci Resolve's `fusionscript` module only supports these versions; 3.12+ will crash).
 - No third-party Python packages required (pure standard library).
 
 ## Usage
@@ -81,6 +81,15 @@ python overlay.py    # start overlay
 - In Resolve, open a timeline named the same as the course, scrub the playhead, and the overlay shows the current intensity in real time.
 - The overlay opens in Edge's `--app` mode (frameless small window) by default.
 - For "always on top", use **Microsoft PowerToys → Always On Top** (Win+Ctrl+T) or any window-pinning tool.
+
+## Deploying to Another Machine
+
+This project is **portable** — no hard-coded user paths. Copy the whole folder to the target machine and ensure the following:
+
+1. **Python 3.10 or 3.11** is installed (the `fusionscript` module only works on these versions).
+2. **DaVinci Resolve** is installed and **External scripting** is enabled (`Preferences → System → General → External scripting using = Local`).
+3. The Resolve scripting module is normally at the fixed system path `C:\ProgramData\Blackmagic Design\DaVinci Resolve\Support\Developer\Scripting\Modules` — this is **independent of which drive** Resolve is installed on. If auto-detection fails, set `resolve_script_path` in `config.json`.
+4. Run `start.bat` — it auto-locates Python via the `py` launcher (prefers 3.11, then 3.10, then falls back to `python` on PATH).
 
 ## Configuration (`config.json`)
 
