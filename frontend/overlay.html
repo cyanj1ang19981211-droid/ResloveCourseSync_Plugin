@@ -53,6 +53,32 @@
   }
   .segment.empty { color: var(--muted); }
 
+  .nextline {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+    font-size: 12px;
+    min-height: 18px;
+    margin-bottom: 4px;
+  }
+  .remaining {
+    color: var(--amber);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+  }
+  .next {
+    color: var(--muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .next .next-name {
+    color: var(--accent);
+    font-weight: 600;
+  }
+
   .subline {
     font-size: 12px;
     color: var(--muted);
@@ -139,6 +165,11 @@
 
   <div class="segment empty" id="segment">— 等待同步 —</div>
 
+  <div class="nextline">
+    <span class="remaining" id="remaining"></span>
+    <span class="next" id="next"></span>
+  </div>
+
   <div class="subline">
     <span id="action"></span>
     <span class="keyword-tag" id="keyword" style="display:none"></span>
@@ -166,6 +197,8 @@ let el = {
   segment: document.getElementById("segment"),
   action: document.getElementById("action"),
   keyword: document.getElementById("keyword"),
+  remaining: document.getElementById("remaining"),
+  next: document.getElementById("next"),
   metrics: document.getElementById("metrics"),
   curve: document.getElementById("curve"),
   status: document.getElementById("status"),
@@ -296,6 +329,19 @@ async function poll() {
       } else {
         el.keyword.style.display = "none";
       }
+      // 当前环节剩余时间（倒计时）
+      if (s.segment_remaining != null && s.segment_remaining > 0) {
+        el.remaining.textContent = "剩余 " + formatTime(s.segment_remaining);
+      } else {
+        el.remaining.textContent = "";
+      }
+      // 下一环节预告
+      if (s.next_segment && s.next_segment.name) {
+        const until = (s.next_segment.start || 0) - (s.time_seconds || 0);
+        el.next.innerHTML = '下一环节 <span class="next-name">' + s.next_segment.name + '</span> · ' + formatTime(Math.max(0, until)) + ' 后';
+      } else {
+        el.next.textContent = "";
+      }
       renderMetrics(s.values, s.field_meta);
       drawCurve(s.curve, s.time_seconds);
       // 显示 worker 模式（直传/外推/封顶），便于诊断"播放不前进"是不是 worker 端卡住
@@ -311,6 +357,8 @@ async function poll() {
       el.segment.className = "segment empty";
       el.action.textContent = "";
       el.keyword.style.display = "none";
+      el.remaining.textContent = "";
+      el.next.textContent = "";
       el.metrics.innerHTML = "";
       drawCurve({ times: [], main: [], sub: [], main_label: "", sub_label: "" }, null);
       el.status.textContent = s.message || "未同步";

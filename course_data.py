@@ -83,6 +83,39 @@ class CourseData:
                 return seg.get("name", "")
         return ""
 
+    def segment_info_at(self, t: float) -> dict:
+        """返回时刻 t 所在环节的完整信息 dict；不在任何环节内返回 None。
+
+        返回：{"name", "start", "end", "remaining"}，其中 remaining = end - t（秒）。
+        """
+        for seg in self.segments:
+            start = float(seg.get("start", 0))
+            end = float(seg.get("end", start))
+            if start <= t < end:
+                return {
+                    "name": seg.get("name", ""),
+                    "start": start,
+                    "end": end,
+                    "remaining": end - t,
+                }
+        return None
+
+    def next_segment_at(self, t: float) -> dict:
+        """返回时刻 t 之后的下一个环节信息 dict；没有则 None。
+
+        返回：{"name", "start", "end"}，start 为下一环节开始时间（秒）。
+        用于「下一环节预告」。
+        """
+        for seg in self.segments:
+            start = float(seg.get("start", 0))
+            if start > t:
+                return {
+                    "name": seg.get("name", ""),
+                    "start": start,
+                    "end": float(seg.get("end", start)),
+                }
+        return None
+
     def action_at(self, t: float) -> str:
         """返回时刻 t 的动作名称；无则空字符串。"""
         p = self._point_at(t)
