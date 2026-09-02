@@ -41,9 +41,22 @@ def _find_module_dir():
         v = os.environ.get(k)
         if v and os.path.exists(v):
             return v
+    # 常见固定位置
     for d in _RESOLVE_MODULE_DIRS_WIN:
         if os.path.isfile(os.path.join(d, "DaVinciResolveScript.py")):
             return d
+    # 全盘符扫描（适配任意安装盘/便携版）：
+    #   <drive>:\ProgramData\Blackmagic Design\DaVinci Resolve\Support\Developer\Scripting\Modules
+    #   <drive>:\Program Files\Blackmagic Design\DaVinci Resolve\Support\Developer\Scripting\Modules
+    for drive in _list_drives():
+        for base in (f"{drive}:\\ProgramData\\Blackmagic Design\\DaVinci Resolve",
+                     f"{drive}:\\Program Files\\Blackmagic Design\\DaVinci Resolve",
+                     f"{drive}:\\Program Files\\DaVinci Resolve",
+                     f"{drive}:\\Davinci",
+                     f"{drive}:\\DaVinci Resolve"):
+            d = os.path.join(base, "Support", "Developer", "Scripting", "Modules")
+            if os.path.isfile(os.path.join(d, "DaVinciResolveScript.py")):
+                return d
     return None
 
 
@@ -58,14 +71,33 @@ def _find_fusionscript_lib():
         p = os.path.join(d, "fusionscript.dll")
         if os.path.isfile(p):
             return p
-    # 扫描所有盘符下的 Davinci 目录
-    for drive in "CDEFGH":
+    # 扫描所有真实存在的盘符下的达芬奇目录（不再硬编码 C~H，适配任意盘符）
+    for drive in _list_drives():
         for root in (f"{drive}:\\Davinci", f"{drive}:\\DaVinci Resolve",
-                     f"{drive}:\\Program Files\\Blackmagic Design\\DaVinci Resolve"):
+                     f"{drive}:\\Program Files\\Blackmagic Design\\DaVinci Resolve",
+                     f"{drive}:\\Program Files\\DaVinci Resolve"):
             p = os.path.join(root, "fusionscript.dll")
             if os.path.isfile(p):
                 return p
     return None
+
+
+def _list_drives():
+    """枚举系统中真实存在的盘符（Windows）。失败时回退到 A~Z 全量扫描。"""
+    try:
+        import ctypes
+        bitmask = ctypes.windll.kernel32.GetLogicalDrives()
+    except Exception:
+        bitmask = 0
+    drives = []
+    if bitmask:
+        for i in range(26):
+            if bitmask & (1 << i):
+                drives.append(chr(ord("A") + i))
+    if not drives:
+        # 回退：A~Z 全量（兼容无法调用 kernel32 的受限环境）
+        drives = [chr(ord("A") + i) for i in range(26)]
+    return drives
 
 
 class ResolveConnection:
