@@ -28,8 +28,23 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from course_data import CourseData, load_course, list_course_files
 from resolve_connection import ResolveConnection, timecode_to_seconds
+from equipment_config import EQUIPMENTS
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+# 器械中文名前缀映射：与 equipment_config.EQUIPMENTS 各 key 一一对应。
+# 用于从「椭圆机-间歇燃脂训练」这种 timeline 名里提取器械维度，避免不同器械但
+# 课程名相近时互相误匹配（如椭圆机的「间歇燃脂训练」 vs 划船机的「间歇燃脂训练」）。
+# 注意：每个 key 的前缀列表互不为前缀（如「单车」不会被「单车内」之类误匹配，
+# 因为这种词不是合法器械名；这里按 key 列出顺序不重要）。
+EQUIPMENT_PREFIX_MAP = {
+    "treadmill":  ["跑步机"],
+    "bike":       ["动感单车", "室内单车", "单车"],
+    "rower":      ["划船机"],
+    "elliptical": ["椭圆机"],
+    "bodyweight": ["徒手"],
+}
 
 
 # ---------- 配置 ----------
@@ -129,25 +144,50 @@ class CourseManager:
                 continue
 
     @staticmethod
-    def _normalize(name: str) -> str:
-        """把课程/时间线名归一化：去掉器械前缀、标点、'训练'后缀等，方便宽松匹配。
-
-        例如 "跑步机-基础跑姿训练" -> "基础跑姿"
-             "基础跑训练"            -> "基础跑"
-        """
-        if not name:
+    def _strip_punct(s: str) -> str:
+        """只去掉标点和空白/连接符，保留中文和数字；不再剥离器械前缀（防止跨器械误匹配）。"""
+        if not s:
             return ""
-        s = str(name)
-        for prefix in ("跑步机", "单车", "划船机", "椭圆机", "徒手"):
-            if s.startswith(prefix):
-                s = s[len(prefix):]
-                break
         for ch in "-_ —\t\n":
             s = s.replace(ch, "")
+        return s.strip()
+
+    @staticmethod
+    def _strip_training_suffix(s: str) -> str:
+        """去掉常见尾缀如"训练"，便于宽松匹配。"""
+        if not s:
+            return ""
         for suf in ("训练",):
             if s.endswith(suf):
                 s = s[:-len(suf)]
         return s.strip()
+
+    @staticmethod
+    def _extract_equipment(name: str):
+        """从时间线/课程名里提取器械前缀，返回 (equipment_key, 去掉前缀后的剩余部分)。
+
+        器械前缀映射（与 equipment_config.EQUIPMENTS 对齐）：
+            跑步机  -> treadmill
+            单车    -> bike（兼容「动感单车」「室内单车」等变体，但以「单车」为最短前缀）
+            划船机  -> rower
+            椭圆机  -> elliptical
+            徒手    -> bodyweight
+
+        返回 (None, name) 表示没识别到器械前缀（不会胡乱猜）。
+        """
+        if not name:
+            return None, ""
+        # 各器械前缀互不为前缀（如「单车」不会匹配「单车内」之外的东西），
+        # 所以顺序不重要；但保持按 key 列出更清晰。
+        for eq_key, prefixes in EQUIPMENT_PREFIX_MAP.items():
+            for p in prefixes:
+                if name.startswith(p):
+                    rest = name[len(p):]
+                    # 剥掉可能紧跟的连接符 " -" / "-" / "_" / " "
+                    while rest and rest[0] in "-_ — ":
+                        rest = rest[1:]
+                    return eq_key, rest
+        return None, name
 
     def clear_all(self):
         """清除 data_dir 下所有课程 JSON 文件，并清空内存缓存。
@@ -176,11 +216,23 @@ class CourseManager:
     def find(self, timeline_name: str):
         """根据时间线名查找课程；每 5 秒重载一次数据目录以支持热更新。
 
-        匹配优先级：
-          1) 精确匹配
-          2) 包含关系（time 含 course 或 course 含 time）
-          3) 归一化后精确匹配（去器械前缀/标点/'训练'后缀）
-          4) 归一化后包含关系（任一方含另一方）
+        匹配原则：**器械一致优先**。
+            不同器械但课程名相近（如「椭圆机-间歇燃脂训练」 vs 「划船机-间歇燃脂训练」）
+            不会互相误匹配——只要 timeline 名里有器械前缀，就只在「同器械」课程里找。
+
+        匹配优先级（从高到低）：
+          A. 精确匹配：timeline_name == course_name
+          B. timeline 含器械前缀：
+             B1. 同器械下精确匹配（去前缀后的剩余名 == 同器械课程的剩余名）
+             B2. 同器械下去标点精确匹配
+             B3. 同器械下去标点+去"训练"后缀精确匹配
+             B4. 同器械下归一化包含匹配（剩余名长度 >= 2 时）
+          C. timeline 不含器械前缀（用户没在名字里标器械）：
+             C1. 跨器械精确匹配（course_name == timeline_name）
+             C2. 跨器械包含匹配
+             C3. 跨器械归一化匹配（保留原行为兜底）
+
+        返回第一个命中；B 系列匹配不上时**不**退化到跨器械匹配（避免椭圆机匹配到划船机）。
         """
         now = time.time()
         if now - getattr(self, "_last_reload", 0) > 5:
@@ -188,24 +240,65 @@ class CourseManager:
             self._last_reload = now
         if not timeline_name:
             return None
-        # 1) 精确匹配
+
+        # A. 精确匹配
         if timeline_name in self._cache:
             return self._cache[timeline_name]
-        # 2) 包含关系
+
+        # 从 timeline 提取器械前缀
+        tl_eq, tl_rest = self._extract_equipment(timeline_name)
+
+        # B. timeline 含器械前缀 → 只在同器械里找
+        if tl_eq is not None:
+            same_eq = [(name, c) for name, c in self._cache.items() if c.equipment == tl_eq]
+            # B1. 同器械精确匹配（course_name == timeline_name）—— 已在 A 中覆盖
+            # B2. 同器械去前缀后剩余名精确匹配
+            if tl_rest:
+                for name, c in same_eq:
+                    _, rest = self._extract_equipment(name)
+                    if rest == tl_rest:
+                        return c
+            # B3. 同器械下去标点精确匹配
+            tl_norm = self._strip_punct(tl_rest) if tl_rest else ""
+            if tl_norm:
+                for name, c in same_eq:
+                    _, rest = self._extract_equipment(name)
+                    if self._strip_punct(rest) == tl_norm:
+                        return c
+                # B4. 同器械下归一化精确匹配（含去"训练"后缀）
+                tl_no_train = self._strip_training_suffix(tl_norm)
+                for name, c in same_eq:
+                    _, rest = self._extract_equipment(name)
+                    rest_no_train = self._strip_training_suffix(self._strip_punct(rest))
+                    if rest_no_train and tl_no_train and rest_no_train == tl_no_train:
+                        return c
+                # B5. 同器械下归一化包含匹配（剩余名长度 >= 2 才用，避免误匹配）
+                if len(tl_no_train) >= 2:
+                    for name, c in same_eq:
+                        _, rest = self._extract_equipment(name)
+                        rest_no_train = self._strip_training_suffix(self._strip_punct(rest))
+                        if rest_no_train and (rest_no_train in tl_no_train or tl_no_train in rest_no_train):
+                            return c
+            # 有器械但同器械下没匹配上 → 返回 None，不退化到跨器械（核心改动）
+            return None
+
+        # C. timeline 不含器械前缀 → 跨器械兜底匹配（保留原行为）
+        # C1. 包含关系
         for name, c in self._cache.items():
             if name and (name in timeline_name or timeline_name in name):
                 return c
-        # 3) 归一化后精确匹配
-        tn = self._normalize(timeline_name)
-        if tn:
+        # C2. 归一化精确匹配
+        tl_norm = self._strip_punct(timeline_name)
+        if tl_norm:
             for name, c in self._cache.items():
-                if tn == self._normalize(name):
+                if self._strip_punct(name) == tl_norm:
                     return c
-        # 4) 归一化后包含关系
-        if tn and len(tn) >= 2:
+        # C3. 归一化包含匹配
+        tl_no_train = self._strip_training_suffix(tl_norm)
+        if tl_no_train and len(tl_no_train) >= 2:
             for name, c in self._cache.items():
-                cn = self._normalize(name)
-                if cn and (cn in tn or tn in cn):
+                cn = self._strip_training_suffix(self._strip_punct(name))
+                if cn and (cn in tl_no_train or tl_no_train in cn):
                     return c
         return None
 
@@ -492,7 +585,8 @@ def resolve_loop():
                 values={},
                 segment_remaining=0.0,
                 next_step=None,
-                message=("未找到同名课程数据" if tl_name else "当前无时间线") + "（数据目录见 config.json）",
+                message=("未找到对应课程的强度数据" if tl_name else "当前无时间线")
+                       + "（按器械+课程名匹配；如确认有对应 JSON，请检查时间线名是否含器械前缀，如'椭圆机-XXX'、'跑步机-XXX'）",
             )
         else:
             # 时间码 -> 秒
