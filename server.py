@@ -149,6 +149,30 @@ class CourseManager:
                 s = s[:-len(suf)]
         return s.strip()
 
+    def clear_all(self):
+        """清除 data_dir 下所有课程 JSON 文件，并清空内存缓存。
+
+        返回 (删除数量, 剩余数量)。只删除 data_dir 内的 .json 文件（不递归子目录、
+        不碰其他目录），删除后立即重载缓存（此时应为空）。
+
+        为什么叫"清缓存"：data/ 里的 JSON 是 xlsx_to_json.py 转换出来的课程数据，
+        用久了会累积；而且若不同课件重名，旧文件可能让同名 timeline 匹配到错误的
+        强度数据。清除后需重新运行 convert 生成干净的数据。
+        """
+        removed = 0
+        files = list_course_files(self.data_dir)
+        for f in files:
+            try:
+                os.remove(f)
+                removed += 1
+            except OSError:
+                continue
+        # 清空内存缓存并重载（此刻 data 已空，重载后 _cache 应为空）
+        self._cache = {}
+        self._last_reload = time.time()
+        remaining = len(list_course_files(self.data_dir))
+        return removed, remaining
+
     def find(self, timeline_name: str):
         """根据时间线名查找课程；每 5 秒重载一次数据目录以支持热更新。
 
@@ -535,6 +559,23 @@ class Handler(BaseHTTPRequestHandler):
         s = STATE.snapshot()
         if self.path in ("/", "/state"):
             self._send_json(s)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def do_POST(self):
+        # 清除课件缓存：删除 data_dir 下所有转换生成的 JSON
+        if self.path == "/clear_cache":
+            try:
+                removed, remaining = COURSES.clear_all()
+                self._send_json({
+                    "ok": True,
+                    "removed": removed,
+                    "remaining": remaining,
+                    "message": f"已清除 {removed} 个课件缓存文件",
+                })
+            except Exception as e:
+                self._send_json({"ok": False, "message": f"清除失败: {e}"})
         else:
             self.send_response(404)
             self.end_headers()
