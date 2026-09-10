@@ -136,12 +136,12 @@ def _parse_bodyweight_sheet(sheet_name, rows, header_idx):
             C 列 = 持续时间（三种格式：纯数字秒 30/35/60、"30S"/"20S" 带 S、"-"/空格/空）
 
     强度判断（徒手课无速度/坡度/阻力数值指标）：
-        动作命中 compound_actions（复合动作）→ intensity = "high"（高强度）
-        否则 → intensity = "low"（低强度）
+        用 score_action() 按动作类型规则表给每个动作打 0~1 连续强度分，
+        同时写 intensity 三档标签（high/mid/low）供前端标签显示。
 
     时间轴：C 列有明确秒数则用它累加；否则（个数型动作）用 _estimate_reps_duration 估算。
     """
-    from equipment_config import is_compound_action
+    from equipment_config import score_action, intensity_level
 
     # 课程主题（第 1 行 A 列的值，例如「核心训练（瑜伽垫）」）
     meta_title = ""
@@ -204,15 +204,17 @@ def _parse_bodyweight_sheet(sheet_name, rows, header_idx):
         # 动作名：空则用「休息」兜底（如 HIIT 里的「休息 」行）
         name = action if action else "休息"
 
-        # 强度判断
-        intensity = "high" if is_compound_action("bodyweight", name) else "low"
+        # 强度判断：连续强度分 + 三档标签
+        score = score_action("bodyweight", name)
+        intensity = intensity_level(score)
 
-        # point：记录动作名、个数、强度
+        # point：记录动作名、个数、强度分、强度标签
         point = {"time": int(round(cur_time))}
         if action:
             point["action"] = action
         if reps is not None:
             point["reps"] = reps
+        point["intensity_score"] = round(score, 2)
         point["intensity"] = intensity
 
         points.append(point)

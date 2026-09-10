@@ -65,7 +65,8 @@ class State:
         self.segment = ""
         self.action = ""
         self.keyword = ""
-        self.intensity = ""       # 徒手课强度标签 "high"/"low"/""
+        self.intensity = ""       # 徒手课强度标签 "high"/"mid"/"low"/""
+        self.intensity_score = 0.0  # 徒手课连续强度分（0~1）
         self.values = {}            # {field_key: display_value}
         self.segment_remaining = 0.0   # 当前环节剩余秒数（end - t）
         self.next_step = None           # 下一个小动作信息 {"name","keyword","start"}，无则 None
@@ -94,6 +95,7 @@ class State:
                 "action": self.action,
                 "keyword": self.keyword,
                 "intensity": self.intensity,
+                "intensity_score": self.intensity_score,
                 "values": dict(self.values),
                 "segment_remaining": self.segment_remaining,
                 "next_step": self.next_step,
@@ -240,13 +242,22 @@ def build_metric_curve(course: CourseData):
 
 
 def build_intensity_curve(course: CourseData):
-    """徒手课：把每段小动作画成阶梯强度段，并叠 reps 副线。
+    """徒手课：把每段小动作画成连续强度阶梯图，并叠 reps 副线。
+
+    徒手课没有速度/阻力等数值指标，强度来自每个动作的「连续强度分」
+    （0~1，由动作类型规则表打分，见 equipment_config.score_action）：
+        - 爆发跳跃（波比/开合跳）≈ 0.95
+        - 多关节抗阻（深蹲/俯卧撑）≈ 0.70
+        - 核心稳定（平板/死虫/臀桥）≈ 0.50
+        - 孤立局部（卷腹/弯举）≈ 0.30
+        - 拉伸放松 ≈ 0.15
+        - 休息/介绍/总结 = 0.00
 
     输出字段：
         kind            : "intensity"（前端据此切换绘制模式）
-        steps           : [{start, end, intensity, reps, action}, ...]（连续阶梯段）
-        intensity_times : [t, t+1, ...] 强度阶梯转折点（前后都是阶梯状，主图只画这条）
-        intensity_vals  : 与 times 等长的数值序列（high=1, low=0.35, 休息/空=-0.05）
+        steps           : [{start, end, intensity, score, reps, action}, ...]（连续阶梯段）
+        intensity_times : 强度阶梯转折点（每段起止两点，构成水平+垂直阶梯）
+        intensity_vals  : 与 times 等长的连续强度分（0~1）
         reps_times      : reps 对应时间点（每个 point 的 time）
         reps_vals       : reps 对应个数（None 表示无 reps）
         main_label      : "强度"
@@ -267,10 +278,10 @@ def build_intensity_curve(course: CourseData):
 
     # 强度阶梯：每段起止画两个点，构成水平横线 + 到下段的垂直竖线
     intensity_times = [segs[0]["start"]]
-    intensity_vals = [_intensity_to_num(segs[0]["intensity"])]
+    intensity_vals = [segs[0]["score"]]
     for s in segs:
         intensity_times.append(s["end"])
-        intensity_vals.append(_intensity_to_num(s["intensity"]))
+        intensity_vals.append(s["score"])
 
     reps_times = []
     reps_vals = []
@@ -288,15 +299,6 @@ def build_intensity_curve(course: CourseData):
         "main_label": "强度",
         "sub_label": "个数",
     }
-
-
-def _intensity_to_num(s: str) -> float:
-    """强度文本 -> 数值：high=1.0, low=0.35, 其他（含休息/空字符串）=-0.05（凹下去）。"""
-    if s == "high":
-        return 1.0
-    if s == "low":
-        return 0.35
-    return -0.05  # 休息/介绍/总结等无强度环节，凹到基线以下
 
 
 def _resolve_worker(q, module_path, lib_path):
@@ -462,6 +464,7 @@ def resolve_loop():
                 action="",
                 keyword="",
                 intensity="",
+                intensity_score=0.0,
                 values={},
                 segment_remaining=0.0,
                 next_step=None,
@@ -479,6 +482,7 @@ def resolve_loop():
             action = course.action_at(t)
             keyword = course.keyword_at(t)
             intensity = course.intensity_at(t)
+            intensity_score = course.intensity_score_at(t)
             values = course.values_at(t)
 
             seg_info = course.segment_info_at(t)
@@ -500,6 +504,7 @@ def resolve_loop():
                 action=action,
                 keyword=keyword,
                 intensity=intensity,
+                intensity_score=intensity_score,
                 values=values,
                 segment_remaining=segment_remaining,
                 next_step=next_step,

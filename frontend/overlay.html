@@ -106,6 +106,10 @@
     background: var(--red);
     color: #2a0a0a;
   }
+  .intensity-tag.mid {
+    background: var(--amber);
+    color: #1a1204;
+  }
   .intensity-tag.low {
     background: var(--green);
     color: #0a2a14;
@@ -265,7 +269,7 @@ function drawCurve(curve, timeNow) {
   // 图例
   if (kind === "intensity") {
     el.mainLegend.style.display = "";
-    el.mainLegendLabel.textContent = "强度（高/低）";
+    el.mainLegendLabel.textContent = "强度（0~1 连续）";
     const hasReps = (curve.reps_vals || []).some(v => v != null);
     el.subLegend.style.display = hasReps ? "" : "none";
     el.subLegendLabel.textContent = "个数";
@@ -342,8 +346,10 @@ function drawMetricCurve(ctx, curve, w, h) {
 }
 
 function drawIntensityCurve(ctx, curve, w, h) {
-  // 徒手课：把每段小动作画成阶梯填充块（高强度=红、低强度=绿、休息=无填充），
-  // 并叠 reps 副线（散点+连线）。让用户一眼看清整节课节奏起伏。
+  // 徒手课：把每段小动作画成「连续强度」阶梯图。
+  // 每段强度是一个 0~1 的 score（由动作类型规则表打分），
+  // 用色阶映射：score 越高越红、越低越绿，休息/介绍 = 灰色凹槽。
+  // 叠 reps 副线（散点+连线，琥珀色）体现每个小节的数量。
   const steps = curve.steps || [];
   if (!steps.length) return;
   const t0 = steps[0].start;
@@ -351,60 +357,58 @@ function drawIntensityCurve(ctx, curve, w, h) {
   if (!(t1 > t0)) return;
   const x = t => (t - t0) / (t1 - t0) * w;
 
-  // 上下边界（基线下方留 18% 用于休息的"凹槽"显示）
-  const topY = 6;
-  const baseY = h - 18;
-  const restY = h - 6;
+  // 纵向：score 0 在底部、1 在顶部。留出底部 6px 给 score≈0 的"休息"段
+  const topY = 4;
+  const baseY = h - 6;
+  const yScore = score => topY + (1 - score) * (baseY - topY);
+
+  // 色阶：score 0→1 从灰绿渐变到红
+  //   0.0（休息）→ 深灰；0.15 拉伸 → 绿；0.5 核心 → 黄绿；0.7 抗阻 → 橙；0.95 爆发 → 红
+  function scoreColor(score) {
+    if (score <= 0.01) return "rgba(120,128,138,0.30)";   // 休息/介绍 = 灰
+    // 0.01~1.0：绿(60,200,120) → 黄(255,200,60) → 红(255,80,80) 三段渐变
+    const r = score < 0.5 ? 60 + (255 - 60) * (score / 0.5) * 0.3
+              : 255;
+    const g = score < 0.5 ? 200 : 200 - (200 - 80) * ((score - 0.5) / 0.5);
+    const b = score < 0.5 ? 120 - 60 * (score / 0.5) : 60 - 20 * ((score - 0.5) / 0.5);
+    return "rgba(" + Math.round(r) + "," + Math.round(g) + "," + Math.round(b) + ",0.85)";
+  }
 
   // 强度阶梯填充
   for (const s of steps) {
     const x0 = x(s.start);
     const x1 = x(s.end);
     const wSeg = Math.max(1, x1 - x0);
-    let color = null;
-    let yTop = baseY;
-    if (s.intensity === "high") {
-      color = "rgba(255,107,107,0.85)";      // 高强度 = 红
-      yTop = topY + (baseY - topY) * 0.1;      // 接近顶端
-    } else if (s.intensity === "low") {
-      color = "rgba(61,220,132,0.55)";        // 低强度 = 绿（半透明，区别于高强度）
-      yTop = topY + (baseY - topY) * 0.4;
-    } else {
-      color = "rgba(154,160,166,0.18)";       // 休息/介绍 = 灰凹槽
-      yTop = restY;
-    }
-    ctx.fillStyle = color;
-    ctx.fillRect(x0, yTop, wSeg, baseY - yTop);
+    const score = (typeof s.score === "number") ? s.score : (s.intensity === "high" ? 0.95 : s.intensity === "mid" ? 0.5 : 0.2);
+    ctx.fillStyle = scoreColor(score);
+    ctx.fillRect(x0, yScore(score), wSeg, baseY - yScore(score));
   }
 
   // 强度阶梯线（描边，让阶梯转折更清晰）
   ctx.beginPath();
-  ctx.moveTo(x(steps[0].start), steps[0].intensity === "high"
-    ? topY + (baseY - topY) * 0.1
-    : (steps[0].intensity === "low" ? topY + (baseY - topY) * 0.4 : restY));
+  let prevScore = (typeof steps[0].score === "number") ? steps[0].score : 0.2;
+  ctx.moveTo(x(steps[0].start), yScore(prevScore));
   for (const s of steps) {
-    const yMid = s.intensity === "high"
-      ? topY + (baseY - topY) * 0.1
-      : (s.intensity === "low" ? topY + (baseY - topY) * 0.4 : restY);
-    ctx.lineTo(x(s.start), yMid);
-    ctx.lineTo(x(s.end), yMid);
+    const score = (typeof s.score === "number") ? s.score : (s.intensity === "high" ? 0.95 : s.intensity === "mid" ? 0.5 : 0.2);
+    ctx.lineTo(x(s.start), yScore(score));
+    ctx.lineTo(x(s.end), yScore(score));
   }
   ctx.strokeStyle = "rgba(232,234,237,0.35)";
   ctx.lineWidth = 1;
   ctx.stroke();
 
-  // reps 副线（散点 + 连线，琥珀色）
+  // reps 副线（散点 + 连线，琥珀色），画在顶部窄带，避免与强度色块混叠
   const repsTimes = curve.reps_times || [];
   const repsVals = curve.reps_vals || [];
   const validPts = repsTimes
     .map((t, i) => ({ t, v: repsVals[i] }))
     .filter(p => p.v != null);
   if (validPts.length >= 1) {
-    // 当所有 reps 都一样时给个小范围防 NaN
     const vs = validPts.map(p => p.v);
     let mn = Math.min(...vs), mx = Math.max(...vs);
     if (mn === mx) { mn -= 1; mx += 1; }
-    const yReps = v => topY + (mx - v) / (mx - mn) * (topY + 6); // 顶部薄层用于副线
+    // 副线压在顶部 0~18px 的窄带内
+    const yReps = v => 2 + (mx - v) / (mx - mn) * 14;
     ctx.strokeStyle = "#ffb347";
     ctx.lineWidth = 1.2;
     ctx.beginPath();
@@ -415,7 +419,6 @@ function drawIntensityCurve(ctx, curve, w, h) {
       ctx.lineTo(x(Math.min(t1, validPts[i].t + 1)), py);
     }
     ctx.stroke();
-    // 散点
     ctx.fillStyle = "#ffb347";
     for (const p of validPts) {
       ctx.beginPath();
@@ -455,11 +458,13 @@ async function poll() {
       } else {
         el.keyword.style.display = "none";
       }
-      // 徒手课强度标签（复合动作=高强度=红，孤立动作=低强度=绿）
-      if (s.intensity === "high" || s.intensity === "low") {
+      // 徒手课强度标签（三档：高强度=红、中强度=橙、低强度=绿），并附连续强度分
+      if (s.intensity === "high" || s.intensity === "mid" || s.intensity === "low") {
         el.intensity.style.display = "";
         el.intensity.className = "intensity-tag " + s.intensity;
-        el.intensity.textContent = s.intensity === "high" ? "高强度" : "低强度";
+        const label = s.intensity === "high" ? "高强度" : s.intensity === "mid" ? "中强度" : "低强度";
+        const score = (typeof s.intensity_score === "number") ? " " + Math.round(s.intensity_score * 100) + "%" : "";
+        el.intensity.textContent = label + score;
       } else {
         el.intensity.style.display = "none";
       }

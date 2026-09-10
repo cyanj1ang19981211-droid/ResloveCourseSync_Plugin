@@ -147,9 +147,23 @@ class CourseData:
         return (p or {}).get(KEYWORD_KEY, "") or ""
 
     def intensity_at(self, t: float) -> str:
-        """返回时刻 t 的强度标签（仅徒手课有意义）："high" / "low" / ""。"""
+        """返回时刻 t 的强度标签（仅徒手课有意义）："high" / "mid" / "low" / ""。"""
         p = self._point_at(t)
         return (p or {}).get("intensity", "") or ""
+
+    def intensity_score_at(self, t: float) -> float:
+        """返回时刻 t 的连续强度分（0~1，仅徒手课有意义）。
+
+        优先取 point 的 intensity_score 字段；旧数据无该字段时用 intensity 标签兜底。
+        """
+        p = self._point_at(t)
+        if not p:
+            return 0.0
+        s = p.get("intensity_score")
+        if s is not None:
+            return float(s)
+        label = p.get("intensity") or "low"
+        return {"high": 0.95, "mid": 0.50, "low": 0.25}.get(label, 0.25)
 
     def reps_at(self, t: float):
         """返回时刻 t 的动作个数（仅徒手课有意义）；无则 None。"""
@@ -160,8 +174,10 @@ class CourseData:
     def intensity_segments(self) -> list:
         """把 points 序列转成「徒手课强度阶梯段」列表（每段一个 constant 强度）。
 
-        返回：[{"start", "end", "intensity", "reps", "action"}, ...]
-        - 强度来自每个 point 的 intensity 字段（"high"/"low"/""）。
+        返回：[{"start", "end", "intensity", "score", "reps", "action"}, ...]
+        - intensity 是标签（"high"/"mid"/"low"）。
+        - score 是连续强度分（0~1），优先取 point 的 intensity_score 字段；
+          旧数据没有该字段时用 intensity 标签兜底换算（high=0.95/mid=0.5/low=0.25）。
         - end 默认为「下一个有 action 的 point 的 time」；最后一个段 end = duration。
           这样阶梯图能自动延伸到课程末尾，不会出现"最后一段没尾巴"。
         - action/reps 直接透传 point 字段（绘图/悬浮提示用）。
@@ -171,7 +187,7 @@ class CourseData:
         if not self.points:
             return []
         # 过滤掉"没有 action 也没有 intensity"的纯时间码点（理论上 xlsx_to_json 不会产出）
-        pts = [p for p in self.points if ACTION_KEY in p or p.get("intensity")]
+        pts = [p for p in self.points if ACTION_KEY in p or p.get("intensity") or p.get("intensity_score") is not None]
         if not pts:
             return []
         result = []
@@ -180,10 +196,16 @@ class CourseData:
             end = float(pts[i + 1].get(TIME_KEY, start)) if i + 1 < len(pts) else self.duration
             if end < start:
                 end = start
+            score = p.get("intensity_score")
+            if score is None:
+                # 旧数据兜底：由 intensity 标签换算
+                label = p.get("intensity") or "low"
+                score = {"high": 0.95, "mid": 0.50, "low": 0.25}.get(label, 0.25)
             result.append({
                 "start": start,
                 "end": end,
                 "intensity": p.get("intensity") or "low",
+                "score": float(score),
                 "reps": p.get("reps"),
                 "action": p.get(ACTION_KEY, "") or "",
             })
