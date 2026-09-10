@@ -146,6 +146,17 @@ class CourseData:
         p = self._point_at(t)
         return (p or {}).get(KEYWORD_KEY, "") or ""
 
+    def intensity_at(self, t: float) -> str:
+        """返回时刻 t 的强度标签（仅徒手课有意义）："high" / "low" / ""。"""
+        p = self._point_at(t)
+        return (p or {}).get("intensity", "") or ""
+
+    def reps_at(self, t: float):
+        """返回时刻 t 的动作个数（仅徒手课有意义）；无则 None。"""
+        p = self._point_at(t)
+        v = (p or {}).get("reps")
+        return v if v is not None else None
+
     def values_at(self, t: float) -> dict:
         """返回时刻 t 的各个指标值（仅返回当前采样点里实际存在且非 null 的字段）。
 

@@ -96,6 +96,20 @@
     padding: 1px 7px;
     border-radius: 10px;
   }
+  .intensity-tag {
+    font-size: 11px;
+    font-weight: 700;
+    padding: 1px 7px;
+    border-radius: 10px;
+  }
+  .intensity-tag.high {
+    background: var(--red);
+    color: #2a0a0a;
+  }
+  .intensity-tag.low {
+    background: var(--green);
+    color: #0a2a14;
+  }
 
   .metrics {
     display: flex;
@@ -172,6 +186,7 @@
 
   <div class="subline">
     <span id="action"></span>
+    <span class="intensity-tag" id="intensity" style="display:none"></span>
     <span class="keyword-tag" id="keyword" style="display:none"></span>
   </div>
 
@@ -197,6 +212,7 @@ let el = {
   segment: document.getElementById("segment"),
   action: document.getElementById("action"),
   keyword: document.getElementById("keyword"),
+  intensity: document.getElementById("intensity"),
   remaining: document.getElementById("remaining"),
   next: document.getElementById("next"),
   metrics: document.getElementById("metrics"),
@@ -329,6 +345,14 @@ async function poll() {
       } else {
         el.keyword.style.display = "none";
       }
+      // 徒手课强度标签（复合动作=高强度=红，孤立动作=低强度=绿）
+      if (s.intensity === "high" || s.intensity === "low") {
+        el.intensity.style.display = "";
+        el.intensity.className = "intensity-tag " + s.intensity;
+        el.intensity.textContent = s.intensity === "high" ? "高强度" : "低强度";
+      } else {
+        el.intensity.style.display = "none";
+      }
       // 当前环节剩余时间（倒计时）
       if (s.segment_remaining != null && s.segment_remaining > 0) {
         el.remaining.textContent = "剩余 " + formatTime(s.segment_remaining);
@@ -357,6 +381,7 @@ async function poll() {
       el.segment.className = "segment empty";
       el.action.textContent = "";
       el.keyword.style.display = "none";
+      el.intensity.style.display = "none";
       el.remaining.textContent = "";
       el.next.textContent = "";
       el.metrics.innerHTML = "";

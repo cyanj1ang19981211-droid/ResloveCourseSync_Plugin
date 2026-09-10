@@ -65,6 +65,7 @@ class State:
         self.segment = ""
         self.action = ""
         self.keyword = ""
+        self.intensity = ""       # 徒手课强度标签 "high"/"low"/""
         self.values = {}            # {field_key: display_value}
         self.segment_remaining = 0.0   # 当前环节剩余秒数（end - t）
         self.next_step = None           # 下一个小动作信息 {"name","keyword","start"}，无则 None
@@ -92,6 +93,7 @@ class State:
                 "segment": self.segment,
                 "action": self.action,
                 "keyword": self.keyword,
+                "intensity": self.intensity,
                 "values": dict(self.values),
                 "segment_remaining": self.segment_remaining,
                 "next_step": self.next_step,
@@ -382,6 +384,7 @@ def resolve_loop():
                 segment="",
                 action="",
                 keyword="",
+                intensity="",
                 values={},
                 segment_remaining=0.0,
                 next_step=None,
@@ -398,6 +401,7 @@ def resolve_loop():
             segment = course.segment_at(t)
             action = course.action_at(t)
             keyword = course.keyword_at(t)
+            intensity = course.intensity_at(t)
             values = course.values_at(t)
 
             seg_info = course.segment_info_at(t)
@@ -418,6 +422,7 @@ def resolve_loop():
                 segment=segment,
                 action=action,
                 keyword=keyword,
+                intensity=intensity,
                 values=values,
                 segment_remaining=segment_remaining,
                 next_step=next_step,

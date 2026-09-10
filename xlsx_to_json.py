@@ -111,6 +111,132 @@ def parse_xlsx(path):
     return result
 
 
+def _estimate_reps_duration(reps):
+    """根据动作「个数」估算时长（秒）。
+
+    徒手课的个数型动作（B 列有个数、C 列无时长）没有固定时长。
+    采用经验估算：每个重复约 2.5 秒 + 10 秒讲解/转场，向上取整到 10 的倍数，
+    保证时间轴连续且符合健身课件节奏（8~16 个约 30~50 秒）。
+    """
+    if reps is None:
+        return 40  # 无个数也无时长时，默认 40 秒（一个动作的常见耗时）
+    sec = reps * 2.5 + 10.0
+    # 向上取整到 10 的整数倍，保持时间轴整洁
+    return int((sec + 9) // 10) * 10
+
+
+def _parse_bodyweight_sheet(sheet_name, rows, header_idx):
+    """解析徒手课（bodyweight）工作表。
+
+    徒手课表结构（与器械课不同）：
+        第 3 行（header_idx）是表头：A=动作名称  B=个数  C=持续时间  D=话术 ...
+        数据从 header_idx+1 开始，每行一个动作：
+            A 列 = 动作名称（每个动作就是一个 point/环节，无「环节」分组概念）
+            B 列 = 个数（数字，或 "-"/空）
+            C 列 = 持续时间（三种格式：纯数字秒 30/35/60、"30S"/"20S" 带 S、"-"/空格/空）
+
+    强度判断（徒手课无速度/坡度/阻力数值指标）：
+        动作命中 compound_actions（复合动作）→ intensity = "high"（高强度）
+        否则 → intensity = "low"（低强度）
+
+    时间轴：C 列有明确秒数则用它累加；否则（个数型动作）用 _estimate_reps_duration 估算。
+    """
+    from equipment_config import is_compound_action
+
+    # 课程主题（第 1 行 A 列的值，例如「核心训练（瑜伽垫）」）
+    meta_title = ""
+    if header_idx >= 1:
+        meta_title = (rows[1].get("A") or "").strip() if len(rows) > 1 else ""
+
+    def fcol(row, col):
+        v = row.get(col)
+        if v is None:
+            return None
+        v = str(v).strip()
+        return v if v != "" else None
+
+    def to_float(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    # 解析持续时间（秒）：支持 "30"、"30S"/"20S"、"-"/" "/空
+    def parse_duration(v):
+        if v is None:
+            return None
+        s = str(v).strip().upper().replace("S", "")
+        if s in ("", "-"):
+            return None
+        n = to_float(s)
+        if n is None:
+            return None
+        return int(round(n))
+
+    segments = []
+    points = []
+    cur_time = 0.0
+
+    for row in rows[header_idx + 1:]:
+        action = fcol(row, "A")
+        reps_raw = fcol(row, "B")
+        dur_raw = fcol(row, "C")
+
+        # 跳过完全空行（A/B/C 都无值）
+        if action is None and reps_raw is None and dur_raw is None:
+            continue
+
+        # 个数：B 列数字有效，"-"/空 视为 None
+        reps = None
+        if reps_raw is not None and reps_raw.strip() != "-":
+            reps = to_float(reps_raw)
+            if reps is not None:
+                reps = int(reps)
+
+        # 时长：优先 C 列明确秒数，否则用个数估算
+        dur_sec = parse_duration(dur_raw)
+        if dur_sec is None:
+            dur_sec = _estimate_reps_duration(reps)
+        # 时长下限：至少 10 秒，避免估算异常
+        if dur_sec < 10:
+            dur_sec = 10
+
+        # 动作名：空则用「休息」兜底（如 HIIT 里的「休息 」行）
+        name = action if action else "休息"
+
+        # 强度判断
+        intensity = "high" if is_compound_action("bodyweight", name) else "low"
+
+        # point：记录动作名、个数、强度
+        point = {"time": int(round(cur_time))}
+        if action:
+            point["action"] = action
+        if reps is not None:
+            point["reps"] = reps
+        point["intensity"] = intensity
+
+        points.append(point)
+
+        # segment：每个动作一个环节（动作名即环节名）
+        segments.append({
+            "name": name,
+            "start": int(round(cur_time)),
+            "end": int(round(cur_time + dur_sec)),
+        })
+
+        cur_time += dur_sec
+
+    course = {
+        "course_name": sheet_name.replace("\n", "").strip(),
+        "title": meta_title or sheet_name.strip(),
+        "equipment": "bodyweight",
+        "duration": int(round(cur_time)),
+        "segments": segments,
+        "points": points,
+    }
+    return course
+
+
 def parse_sheet(sheet_name, rows):
     """把单个 sheet 的原始行解析成课程 JSON dict。"""
     from equipment_config import detect_equipment
@@ -120,15 +246,19 @@ def parse_sheet(sheet_name, rows):
 
     # 表头在第 3 行（第 1、2 行是课程元信息）。数据从第 4 行开始。
     # 但行号不一定是连续的 1..N，这里按「有内容的行」解析。
-    # 找表头行：A 列 = "环节" 的行（徒手类课件是「动作名称」，需单独处理）
+    # 找表头行：A 列 = "环节"（器械类）或 "动作名称"（徒手类）。
     header_idx = None
     for i, row in enumerate(rows):
         a = (row.get("A") or "").strip()
-        if a == "环节":
+        if a in ("环节", "动作名称"):
             header_idx = i
             break
     if header_idx is None:
-        raise ValueError(f"工作表 {sheet_name} 无「环节」表头（可能是徒手类，暂不支持自动转换）")
+        raise ValueError(f"工作表 {sheet_name} 无「环节」或「动作名称」表头，无法解析")
+
+    # 徒手课走独立解析分支（无器械指标列，强度靠动作类型判断）
+    if equipment == "bodyweight":
+        return _parse_bodyweight_sheet(sheet_name, rows, header_idx)
 
     # 课程元信息（第 1 行表头 + 第 2 行值）
     meta = {}
