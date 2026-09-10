@@ -189,8 +189,24 @@ COURSES = CourseManager(CONFIG["data_dir"])
 
 # ---------- 达芬奇 worker（独立子进程，避免 fusionscript 的 GIL 阻塞主进程 HTTP） ----------
 
+# ---------- 折线图数据生成 ----------
+
 def build_curve(course: CourseData):
-    """从课程数据构建曲线预览数据（供前端画图）。"""
+    """根据器械类型返回对应的曲线预览数据。
+
+    - 器械课（跑步机/单车/划船机/椭圆机）：从 points 里抽 speed/incline 等数值字段
+      画出连续折线。
+    - 徒手课：没有速度/阻力等数值指标，但每个小动作有自己的强度（high/low）
+      和个数（reps），用阶梯图能清晰看到「这节课哪里是高强度、哪里是休息」。
+    """
+    eq = course.equipment
+    if eq == "bodyweight":
+        return build_intensity_curve(course)
+    return build_metric_curve(course)
+
+
+def build_metric_curve(course: CourseData):
+    """器械课：从 points 里抽主指标+副指标，画连续折线。"""
     main_key = None
     sub_key = None
     for f in course.field_order:
@@ -214,12 +230,73 @@ def build_curve(course: CourseData):
         sub.append(p.get(sub_key) if sub_key else None)
 
     return {
+        "kind": "metric",         # 给前端区分绘制方式
         "times": times,
         "main": main,
         "sub": sub,
         "main_label": label_of(main_key),
         "sub_label": label_of(sub_key),
     }
+
+
+def build_intensity_curve(course: CourseData):
+    """徒手课：把每段小动作画成阶梯强度段，并叠 reps 副线。
+
+    输出字段：
+        kind            : "intensity"（前端据此切换绘制模式）
+        steps           : [{start, end, intensity, reps, action}, ...]（连续阶梯段）
+        intensity_times : [t, t+1, ...] 强度阶梯转折点（前后都是阶梯状，主图只画这条）
+        intensity_vals  : 与 times 等长的数值序列（high=1, low=0.35, 休息/空=-0.05）
+        reps_times      : reps 对应时间点（每个 point 的 time）
+        reps_vals       : reps 对应个数（None 表示无 reps）
+        main_label      : "强度"
+        sub_label       : "个数"
+    """
+    segs = course.intensity_segments()
+    if not segs:
+        return {
+            "kind": "intensity",
+            "steps": [],
+            "intensity_times": [],
+            "intensity_vals": [],
+            "reps_times": [],
+            "reps_vals": [],
+            "main_label": "强度",
+            "sub_label": "个数",
+        }
+
+    # 强度阶梯：每段起止画两个点，构成水平横线 + 到下段的垂直竖线
+    intensity_times = [segs[0]["start"]]
+    intensity_vals = [_intensity_to_num(segs[0]["intensity"])]
+    for s in segs:
+        intensity_times.append(s["end"])
+        intensity_vals.append(_intensity_to_num(s["intensity"]))
+
+    reps_times = []
+    reps_vals = []
+    for s in segs:
+        reps_times.append(s["start"])
+        reps_vals.append(s["reps"])
+
+    return {
+        "kind": "intensity",
+        "steps": segs,
+        "intensity_times": intensity_times,
+        "intensity_vals": intensity_vals,
+        "reps_times": reps_times,
+        "reps_vals": reps_vals,
+        "main_label": "强度",
+        "sub_label": "个数",
+    }
+
+
+def _intensity_to_num(s: str) -> float:
+    """强度文本 -> 数值：high=1.0, low=0.35, 其他（含休息/空字符串）=-0.05（凹下去）。"""
+    if s == "high":
+        return 1.0
+    if s == "low":
+        return 0.35
+    return -0.05  # 休息/介绍/总结等无强度环节，凹到基线以下
 
 
 def _resolve_worker(q, module_path, lib_path):

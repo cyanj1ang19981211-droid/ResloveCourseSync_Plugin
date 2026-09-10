@@ -154,6 +154,7 @@
   .legend { display: flex; align-items: center; gap: 4px; }
   .legend .swatch { width: 10px; height: 3px; border-radius: 2px; display: inline-block; }
   canvas { width: 100%; height: 80px; display: block; }
+  .curve-box.tall canvas { height: 130px; }
 
   .status {
     margin-top: 8px;
@@ -192,7 +193,7 @@
 
   <div class="metrics" id="metrics"></div>
 
-  <div class="curve-box">
+  <div class="curve-box" id="curveBox">
     <div class="caption">
       <span class="legend" id="mainLegend" style="display:none"><span class="swatch" style="background:var(--accent)"></span><span id="mainLegendLabel"></span></span>
       <span class="legend" id="subLegend" style="display:none"><span class="swatch" style="background:var(--amber)"></span><span id="subLegendLabel"></span></span>
@@ -217,6 +218,7 @@ let el = {
   next: document.getElementById("next"),
   metrics: document.getElementById("metrics"),
   curve: document.getElementById("curve"),
+  curveBox: document.getElementById("curveBox"),
   status: document.getElementById("status"),
   mode: document.getElementById("mode"),
   mainLegend: document.getElementById("mainLegend"),
@@ -258,22 +260,61 @@ function drawCurve(curve, timeNow) {
   ctx.scale(dpr, dpr);
   ctx.clearRect(0, 0, w, h);
 
+  const kind = curve.kind || "metric";
+
+  // 图例
+  if (kind === "intensity") {
+    el.mainLegend.style.display = "";
+    el.mainLegendLabel.textContent = "强度（高/低）";
+    const hasReps = (curve.reps_vals || []).some(v => v != null);
+    el.subLegend.style.display = hasReps ? "" : "none";
+    el.subLegendLabel.textContent = "个数";
+    drawIntensityCurve(ctx, curve, w, h);
+  } else {
+    const hasMain = curve.main_label && (curve.main || []).some(v => v !== null && v !== undefined);
+    const hasSub = curve.sub_label && (curve.sub || []).some(v => v !== null && v !== undefined);
+    el.mainLegend.style.display = hasMain ? "" : "none";
+    if (hasMain) el.mainLegendLabel.textContent = curve.main_label;
+    el.subLegend.style.display = hasSub ? "" : "none";
+    if (hasSub) el.subLegendLabel.textContent = curve.sub_label;
+    drawMetricCurve(ctx, curve, w, h);
+  }
+
+  // 播放头位置竖线（两种模式通用）
+  if (timeNow !== null && timeNow !== undefined) {
+    const t0 = curve.kind === "intensity"
+      ? (curve.intensity_times?.[0] ?? 0)
+      : (curve.times?.[0] ?? 0);
+    const t1 = curve.kind === "intensity"
+      ? (curve.intensity_times?.[curve.intensity_times.length - 1] ?? 0)
+      : (curve.times?.[curve.times.length - 1] ?? 0);
+    if (t1 > t0) {
+      const px = (Math.min(Math.max(timeNow, t0), t1) - t0) / (t1 - t0) * w;
+      ctx.beginPath();
+      ctx.moveTo(px, 0);
+      ctx.lineTo(px, h);
+      ctx.strokeStyle = "rgba(255,255,255,0.55)";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 3]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+}
+
+function drawMetricCurve(ctx, curve, w, h) {
+  // 器械课：主曲线（速度/踏频/桨频）+ 副曲线（坡度/阻力）
   const times = curve.times || [];
   const main = curve.main || [];
   const sub = curve.sub || [];
   const hasMain = curve.main_label && main.some(v => v !== null && v !== undefined);
   const hasSub = curve.sub_label && sub.some(v => v !== null && v !== undefined);
 
-  el.mainLegend.style.display = hasMain ? "" : "none";
-  el.subLegend.style.display = hasSub ? "" : "none";
-  if (hasMain) el.mainLegendLabel.textContent = curve.main_label;
-  if (hasSub) el.subLegendLabel.textContent = curve.sub_label;
-
+  if (!hasMain && !hasSub) return;
   if (times.length < 2) return;
   const t0 = times[0], t1 = times[times.length - 1];
   const x = t => (t - t0) / (t1 - t0) * w;
 
-  // 主曲线（速度/踏频/桨频），null 视为 0（停止）
   if (hasMain) {
     const vals = main.map(v => (v === null || v === undefined) ? 0 : v);
     let mn = Math.min(...vals), mx = Math.max(...vals);
@@ -286,8 +327,6 @@ function drawCurve(curve, timeNow) {
     ctx.lineWidth = 2;
     ctx.stroke();
   }
-
-  // 副曲线（坡度/阻力），null 视为 0
   if (hasSub) {
     const vals = sub.map(v => (v === null || v === undefined) ? 0 : v);
     let mn = Math.min(...vals), mx = Math.max(...vals);
@@ -300,18 +339,89 @@ function drawCurve(curve, timeNow) {
     ctx.lineWidth = 1.5;
     ctx.stroke();
   }
+}
 
-  // 播放头位置竖线
-  if (timeNow !== null && timeNow !== undefined) {
-    const px = x(Math.min(Math.max(timeNow, t0), t1));
+function drawIntensityCurve(ctx, curve, w, h) {
+  // 徒手课：把每段小动作画成阶梯填充块（高强度=红、低强度=绿、休息=无填充），
+  // 并叠 reps 副线（散点+连线）。让用户一眼看清整节课节奏起伏。
+  const steps = curve.steps || [];
+  if (!steps.length) return;
+  const t0 = steps[0].start;
+  const t1 = steps[steps.length - 1].end;
+  if (!(t1 > t0)) return;
+  const x = t => (t - t0) / (t1 - t0) * w;
+
+  // 上下边界（基线下方留 18% 用于休息的"凹槽"显示）
+  const topY = 6;
+  const baseY = h - 18;
+  const restY = h - 6;
+
+  // 强度阶梯填充
+  for (const s of steps) {
+    const x0 = x(s.start);
+    const x1 = x(s.end);
+    const wSeg = Math.max(1, x1 - x0);
+    let color = null;
+    let yTop = baseY;
+    if (s.intensity === "high") {
+      color = "rgba(255,107,107,0.85)";      // 高强度 = 红
+      yTop = topY + (baseY - topY) * 0.1;      // 接近顶端
+    } else if (s.intensity === "low") {
+      color = "rgba(61,220,132,0.55)";        // 低强度 = 绿（半透明，区别于高强度）
+      yTop = topY + (baseY - topY) * 0.4;
+    } else {
+      color = "rgba(154,160,166,0.18)";       // 休息/介绍 = 灰凹槽
+      yTop = restY;
+    }
+    ctx.fillStyle = color;
+    ctx.fillRect(x0, yTop, wSeg, baseY - yTop);
+  }
+
+  // 强度阶梯线（描边，让阶梯转折更清晰）
+  ctx.beginPath();
+  ctx.moveTo(x(steps[0].start), steps[0].intensity === "high"
+    ? topY + (baseY - topY) * 0.1
+    : (steps[0].intensity === "low" ? topY + (baseY - topY) * 0.4 : restY));
+  for (const s of steps) {
+    const yMid = s.intensity === "high"
+      ? topY + (baseY - topY) * 0.1
+      : (s.intensity === "low" ? topY + (baseY - topY) * 0.4 : restY);
+    ctx.lineTo(x(s.start), yMid);
+    ctx.lineTo(x(s.end), yMid);
+  }
+  ctx.strokeStyle = "rgba(232,234,237,0.35)";
+  ctx.lineWidth = 1;
+  ctx.stroke();
+
+  // reps 副线（散点 + 连线，琥珀色）
+  const repsTimes = curve.reps_times || [];
+  const repsVals = curve.reps_vals || [];
+  const validPts = repsTimes
+    .map((t, i) => ({ t, v: repsVals[i] }))
+    .filter(p => p.v != null);
+  if (validPts.length >= 1) {
+    // 当所有 reps 都一样时给个小范围防 NaN
+    const vs = validPts.map(p => p.v);
+    let mn = Math.min(...vs), mx = Math.max(...vs);
+    if (mn === mx) { mn -= 1; mx += 1; }
+    const yReps = v => topY + (mx - v) / (mx - mn) * (topY + 6); // 顶部薄层用于副线
+    ctx.strokeStyle = "#ffb347";
+    ctx.lineWidth = 1.2;
     ctx.beginPath();
-    ctx.moveTo(px, 0);
-    ctx.lineTo(px, h);
-    ctx.strokeStyle = "rgba(255,255,255,0.5)";
-    ctx.lineWidth = 1;
-    ctx.setLineDash([3, 3]);
+    for (let i = 0; i < validPts.length; i++) {
+      const px = x(validPts[i].t);
+      const py = yReps(validPts[i].v);
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      ctx.lineTo(x(Math.min(t1, validPts[i].t + 1)), py);
+    }
     ctx.stroke();
-    ctx.setLineDash([]);
+    // 散点
+    ctx.fillStyle = "#ffb347";
+    for (const p of validPts) {
+      ctx.beginPath();
+      ctx.arc(x(p.t), yReps(p.v), 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
   }
 }
 
@@ -367,6 +477,8 @@ async function poll() {
         el.next.textContent = "";
       }
       renderMetrics(s.values, s.field_meta);
+      // 徒手课只有强度折线，没有数值卡片 → canvas 撑高更好看
+      el.curveBox.classList.toggle("tall", s.equipment === "bodyweight");
       drawCurve(s.curve, s.time_seconds);
       // 显示 worker 模式（直传/外推/封顶），便于诊断"播放不前进"是不是 worker 端卡住
       const mode = s.mode || "?";
@@ -385,7 +497,7 @@ async function poll() {
       el.remaining.textContent = "";
       el.next.textContent = "";
       el.metrics.innerHTML = "";
-      drawCurve({ times: [], main: [], sub: [], main_label: "", sub_label: "" }, null);
+      drawCurve({ kind: "metric", times: [], main: [], sub: [], main_label: "", sub_label: "" }, null);
       el.status.textContent = s.message || "未同步";
       el.mode.textContent = "";
     }

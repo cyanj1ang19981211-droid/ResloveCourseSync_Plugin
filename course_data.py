@@ -157,6 +157,38 @@ class CourseData:
         v = (p or {}).get("reps")
         return v if v is not None else None
 
+    def intensity_segments(self) -> list:
+        """把 points 序列转成「徒手课强度阶梯段」列表（每段一个 constant 强度）。
+
+        返回：[{"start", "end", "intensity", "reps", "action"}, ...]
+        - 强度来自每个 point 的 intensity 字段（"high"/"low"/""）。
+        - end 默认为「下一个有 action 的 point 的 time」；最后一个段 end = duration。
+          这样阶梯图能自动延伸到课程末尾，不会出现"最后一段没尾巴"。
+        - action/reps 直接透传 point 字段（绘图/悬浮提示用）。
+
+        注意：与 points 不同，强度段是「连续覆盖整节课时长」的，不会有间隙。
+        """
+        if not self.points:
+            return []
+        # 过滤掉"没有 action 也没有 intensity"的纯时间码点（理论上 xlsx_to_json 不会产出）
+        pts = [p for p in self.points if ACTION_KEY in p or p.get("intensity")]
+        if not pts:
+            return []
+        result = []
+        for i, p in enumerate(pts):
+            start = float(p.get(TIME_KEY, 0))
+            end = float(pts[i + 1].get(TIME_KEY, start)) if i + 1 < len(pts) else self.duration
+            if end < start:
+                end = start
+            result.append({
+                "start": start,
+                "end": end,
+                "intensity": p.get("intensity") or "low",
+                "reps": p.get("reps"),
+                "action": p.get(ACTION_KEY, "") or "",
+            })
+        return result
+
     def values_at(self, t: float) -> dict:
         """返回时刻 t 的各个指标值（仅返回当前采样点里实际存在且非 null 的字段）。
 
