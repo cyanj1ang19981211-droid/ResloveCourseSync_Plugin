@@ -43,6 +43,10 @@ WINDOW_SIZE_MAX = (720, 620)      # 太大的屏幕上别铺满
 # 改动时两处要一起改。
 OVERLAY_TITLE = "课程强度同步"
 
+# 是否让悬浮窗「始终置顶」（替代手动按 Win+Ctrl+T，效果同 PowerToys 的
+# Always On Top）。config.json 里可用 "always_on_top": false 关掉。
+ALWAYS_ON_TOP = True
+
 # 找到 Edge 浏览器
 EDGE_PATHS = [
     r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
@@ -154,6 +158,17 @@ def compute_window_size():
     return w, h
 
 
+def always_on_top_enabled():
+    """是否启用「始终置顶」（config.json 的 always_on_top，默认开）。
+
+    写错类型/读不到配置都按默认走，不让用户因为一个配置项打不开窗口。
+    """
+    val = _read_config().get("always_on_top", ALWAYS_ON_TOP)
+    if isinstance(val, str):
+        return val.strip().lower() not in ("0", "false", "no", "off")
+    return bool(val)
+
+
 def launch_overlay(detached=True):
     """打开悬浮窗，返回 (是否成功, 是否为独立 app 窗口)。
 
@@ -163,6 +178,7 @@ def launch_overlay(detached=True):
     edge = find_edge()
     url = overlay_url()
     size = compute_window_size()
+    topmost = always_on_top_enabled()
 
     if edge:
         cmd = [
@@ -179,8 +195,8 @@ def launch_overlay(detached=True):
         else:
             # Edge 对 --app 窗口会恢复「上次记住的尺寸」，常常完全无视
             # --window-size（实测请求 415x370，实际开出 1522x1660 = 半屏）。
-            # 所以等窗口出现后再用 SetWindowPos 强制一次。
-            _enforce_window_size(size)
+            # 所以等窗口出现后再用 SetWindowPos 强制一次，同时把它置顶。
+            _enforce_window_layout(size, topmost=topmost)
             return True, True
 
     # 没有 Edge 时退回默认浏览器（会是普通标签页，非独立窗口）
@@ -189,6 +205,31 @@ def launch_overlay(detached=True):
         return True, False
     except Exception:
         return False, False
+
+
+def keep_on_top(size=None, topmost=None):
+    """复查并恢复悬浮窗的「置顶 + 尺寸」，返回是否找到了窗口。
+
+    给 launcher 周期性调用（每秒一次即可）：置顶状态可能被别的程序/系统操作顶掉，
+    尺寸也可能被 Edge 自己套回记忆值，这里发现不对就立刻纠正。
+
+    只在「确实不对」时才调用 Win32，避免每秒都去动窗口（无谓的抖动）。
+    """
+    if topmost is None:
+        topmost = always_on_top_enabled()
+    hwnd = _find_overlay_hwnd()
+    if not hwnd:
+        return False
+
+    if size:
+        rect = _window_rect(hwnd)
+        if not rect or rect[2] != int(size[0]) or rect[3] != int(size[1]):
+            _apply_window_size(hwnd, int(size[0]), int(size[1]))
+
+    if topmost and not _is_topmost(hwnd):
+        _set_topmost(hwnd, True)
+
+    return True
 
 
 # ------------------------------------------------------- 强制窗口尺寸（Win32）
@@ -225,6 +266,8 @@ def _win32():
         u32.SetWindowPos.restype = wintypes.BOOL
         u32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
         u32.ShowWindow.restype = wintypes.BOOL
+        u32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+        u32.GetWindowLongW.restype = ctypes.c_long
         k32.GetConsoleWindow.restype = wintypes.HWND
         return u32, wintypes
     except Exception:
@@ -310,11 +353,56 @@ def _apply_window_size(hwnd, w, h):
         return False
 
 
-def _enforce_window_size(size, timeout=10.0):
-    """等悬浮窗出现后，把尺寸强制成 size=(w, h)。
+# ---------------------------------------------------------- 始终置顶（Win32）
+#
+# 等价于 PowerToys 的 Always On Top：给窗口加 WS_EX_TOPMOST。
+# 用 SetWindowPos(HWND_TOPMOST, ..., SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE) 实现：
+#   - NOMOVE/NOSIZE：只改 Z 序，不动我们刚设好的尺寸和位置；
+#   - NOACTIVATE：不要把焦点从达芬奇抢过来（否则用户在达芬奇里按空格暂停会被打断）。
+
+HWND_TOPMOST = -1
+HWND_NOTOPMOST = -2
+SWP_NOSIZE = 0x0001
+SWP_NOMOVE = 0x0002
+SWP_NOACTIVATE = 0x0010
+GWL_EXSTYLE = -20
+WS_EX_TOPMOST = 0x00000008
+
+
+def _set_topmost(hwnd, on=True):
+    """把窗口设为「始终置顶」/取消置顶。成功返回 True。"""
+    u32, _wintypes = _win32()
+    if not u32:
+        return False
+    try:
+        return bool(u32.SetWindowPos(
+            hwnd,
+            HWND_TOPMOST if on else HWND_NOTOPMOST,
+            0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        ))
+    except Exception:
+        return False
+
+
+def _is_topmost(hwnd):
+    """检查窗口当前是否已经是置顶状态（读 WS_EX_TOPMOST 扩展样式位）。"""
+    u32, _wintypes = _win32()
+    if not u32:
+        return False
+    try:
+        ex = u32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        return bool(ex & WS_EX_TOPMOST)
+    except Exception:
+        return False
+
+
+def _enforce_window_layout(size, topmost=True, timeout=10.0):
+    """等悬浮窗出现后，把尺寸和置顶都强制成我们想要的样子。
 
     为什么要「反复确认」：Edge 可能在窗口显示后的一小会儿才把记忆中的尺寸套回去，
-    所以只在尺寸连续两次都对时才收手，否则继续纠正。最多等 timeout 秒。
+    也可能重建窗口把置顶状态弄丢，所以只在「尺寸和置顶都连续两次正确」时才收手，
+    否则继续纠正。最多等 timeout 秒。
     找不到窗口（比如没装 Edge / 被系统拦住）就直接返回，不影响主流程。
     """
     w, h = int(size[0]), int(size[1])
@@ -324,13 +412,18 @@ def _enforce_window_size(size, timeout=10.0):
         hwnd = _find_overlay_hwnd()
         if hwnd:
             rect = _window_rect(hwnd)
-            if rect and rect[2] == w and rect[3] == h:
+            size_ok = bool(rect and rect[2] == w and rect[3] == h)
+            top_ok = (not topmost) or _is_topmost(hwnd)
+            if size_ok and top_ok:
                 stable += 1
                 if stable >= 2:
                     return True
             else:
                 stable = 0
-                _apply_window_size(hwnd, w, h)
+                if not size_ok:
+                    _apply_window_size(hwnd, w, h)
+                if not top_ok:
+                    _set_topmost(hwnd, True)
         time.sleep(0.15)
     return False
 
@@ -342,7 +435,9 @@ def launch():
         return
     if app_mode:
         print("已启动悬浮窗（Edge app 模式）。")
-        print("若需始终置顶，可安装 PowerToys 的 Always On Top，或用第三方置顶工具。")
+        if always_on_top_enabled():
+            print("已自动置顶（无需再按 Win+Ctrl+T；可在 config.json 里用"
+                  " always_on_top=false 关掉）。")
     else:
         print("未找到 Edge，已用默认浏览器打开（非置顶窗口）。")
 

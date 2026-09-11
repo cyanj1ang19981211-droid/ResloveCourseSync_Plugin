@@ -220,6 +220,21 @@
     border-color: var(--red);
     background: rgba(255, 107, 107, 0.08);
   }
+  /* 数据为空时按钮变成「选择课件」——蓝色，和"删除"区分开 */
+  .clear-btn.primary {
+    color: var(--accent);
+    border-color: rgba(77, 163, 255, 0.5);
+  }
+  .clear-btn.primary:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: rgba(77, 163, 255, 0.12);
+  }
+  /* 正在等用户选课件/转换中 */
+  .clear-btn.busy {
+    color: var(--amber);
+    border-color: rgba(255, 179, 71, 0.5);
+  }
   .clear-btn:disabled {
     opacity: 0.5;
     cursor: not-allowed;
@@ -287,7 +302,7 @@
       <div class="status" id="status">正在连接服务...</div>
       <div class="mode" id="mode"></div>
     </div>
-    <button class="clear-btn" id="clearBtn" type="button">清除课件缓存</button>
+    <button class="clear-btn" id="clearBtn" type="button" title="清除 data/ 下所有已转换的课件数据">清除课件缓存</button>
   </div>
 
 <script>
@@ -597,6 +612,24 @@ async function poll() {
       el.status.textContent = s.message || "未同步";
       el.mode.textContent = "";
     }
+
+    // ---- 右下角按钮状态同步（课件数 / 是否正在转换）----
+    if (typeof s.course_count === "number") courseCount = s.course_count;
+    if (typeof s.converting === "boolean" && s.converting !== converting) {
+      converting = s.converting;
+      if (converting) noticeUntil = 0;   // 开始新一轮转换，清掉上次的结果提示
+    }
+    renderActionButton();
+
+    // 转换刚结束时，把结果（已导入 N 个课件 / 已取消…）在状态栏显示几秒
+    if (!converting && s.convert_message && s.convert_message !== lastConvertMsg) {
+      lastConvertMsg = s.convert_message;
+      if (s.convert_ok === true || s.convert_ok === false) setNotice(s.convert_message);
+    }
+    if (noticeText) {
+      if (Date.now() < noticeUntil) el.status.textContent = noticeText;
+      else noticeText = "";
+    }
   } catch (e) {
     clearTimeout(timer);
     failStreak += 1;
@@ -616,13 +649,82 @@ function formatTime(sec) {
   return pad(m) + ":" + pad(s);
 }
 
+// ------------------------------------------------------------------
+// 右下角按钮：一个按钮两种身份
+//   有课件数据（course_count > 0）→ 「清除课件缓存」
+//   没有课件数据（course_count = 0）→ 「选择课件」（功能同 convert.bat）
+//   正在等用户选文件 → 「等待选择…」（禁用）
+// 这样清完缓存不用退出插件，直接在前端点一下就能重新导入课件。
+// ------------------------------------------------------------------
+
+const CLEAR_TEXT = "清除课件缓存";
+const PICK_TEXT = "选择课件";
+
+let courseCount = 0;        // 后端 data/ 里现有的课件 JSON 数
+let converting = false;     // 是否正在等用户选课件 / 转换中
+let lastConvertMsg = "";    // 上一次转换结果（用于判断"有新结果"）
+let noticeText = "";        // 短暂提示（优先显示在状态栏，几秒后自动消失）
+let noticeUntil = 0;
+
+function renderActionButton() {
+  const btn = el.clearBtn;
+  if (converting) {
+    btn.disabled = true;
+    btn.textContent = "等待选择…";
+    btn.title = "已弹出系统文件选择窗口，请在里面选择课件表格";
+    btn.className = "clear-btn busy";
+    return;
+  }
+  btn.disabled = false;
+  if (courseCount > 0) {
+    btn.textContent = CLEAR_TEXT;
+    btn.title = "清除 data/ 下所有已转换的课件数据";
+    btn.className = "clear-btn danger";
+  } else {
+    btn.textContent = PICK_TEXT;
+    btn.title = "选择课件表格并转换（等同双击 convert.bat）";
+    btn.className = "clear-btn primary";
+  }
+}
+
+function setNotice(text, ms) {
+  noticeText = text || "";
+  noticeUntil = Date.now() + (ms || 6000);
+}
+
+// 选择课件：后端起 convert_course.py 弹系统文件框（和双击 convert.bat 一模一样），
+// 选完自动转换写进 data/；转换结束后轮询会带回 course_count > 0，
+// 按钮自动切回「清除课件缓存」。
+async function chooseCourse() {
+  if (converting) return;
+  converting = true;
+  renderActionButton();
+  el.status.textContent = "已弹出选择窗口，请选择课件表格…";
+  try {
+    const r = await fetch(BASE + "/convert", { method: "POST" });
+    const res = await r.json();
+    if (!res.ok) {
+      converting = false;
+      setNotice(res.message || "无法启动转换");
+      renderActionButton();
+    }
+    // ok 的话保持「等待选择…」，交给轮询去发现转换结束
+  } catch (e) {
+    converting = false;
+    setNotice("无法连接服务，请重新双击 start.bat");
+    renderActionButton();
+  }
+}
+
 // 清除课件缓存：删除 data/ 下所有转换生成的 JSON（防止同名课件匹配到旧数据）
 async function clearCache() {
-  const sure = confirm("确定要清除所有课件缓存（data/*.json）吗？\n\n清除后需重新运行 convert.bat 生成课程数据，否则将无法匹配任何课程。");
+  const sure = confirm(
+    "确定要清除所有课件缓存（data/*.json）吗？\n\n" +
+    "清除后按钮会变成「选择课件」，可以直接在这里重新导入课件表格。"
+  );
   if (!sure) return;
 
   el.clearBtn.disabled = true;
-  const originalText = el.clearBtn.textContent;
   el.clearBtn.textContent = "清除中…";
   el.status.textContent = "正在清除课件缓存…";
 
@@ -630,19 +732,27 @@ async function clearCache() {
     const r = await fetch(BASE + "/clear_cache", { method: "POST" });
     const res = await r.json();
     if (res.ok) {
-      el.status.textContent = res.message + "，已清空内存缓存";
+      // 立刻按返回值更新按钮状态，不用等下一次轮询
+      if (typeof res.remaining === "number") courseCount = res.remaining;
+      setNotice(res.message + "，已清空内存缓存");
     } else {
-      el.status.textContent = res.message || "清除失败";
+      setNotice(res.message || "清除失败");
     }
   } catch (e) {
-    el.status.textContent = "清除失败：无法连接服务";
+    setNotice("清除失败：无法连接服务");
   } finally {
-    el.clearBtn.disabled = false;
-    el.clearBtn.textContent = originalText;
+    renderActionButton();
   }
 }
 
-el.clearBtn.addEventListener("click", clearCache);
+function onActionClick() {
+  if (converting) return;
+  if (courseCount > 0) clearCache();
+  else chooseCourse();
+}
+
+el.clearBtn.addEventListener("click", onActionClick);
+renderActionButton();
 
 // 关窗时通知后端退出：后端在后台默默跑着（没有窗口），如果这里不发信号，
 // 用户关掉悬浮窗后它就变成看不见的僵尸进程，下次启动还占着 8765 端口。

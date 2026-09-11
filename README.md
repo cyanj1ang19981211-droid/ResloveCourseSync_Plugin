@@ -32,10 +32,10 @@ overlay.html  ── dark overlay window, real-time rendering
 | `resolve_connection.py` | Wrapper around the DaVinci Resolve Scripting API |
 | `course_data.py` | Course data loading + stepped (time-based) queries |
 | `equipment_config.py` | Equipment field configuration (treadmill / bike / rower / elliptical / bodyweight) |
-| `overlay.html` / `overlay.py` | Dark overlay window + Edge app-mode launcher |
+| `overlay.html` / `overlay.py` | Dark overlay window + Edge app-mode launcher (auto always-on-top, auto size fix) |
 | `xlsx_to_json.py` | **Converts course `.xlsx` files into plugin JSON** (command-line entry) |
 | `convert_course.py` / `convert.bat` | Graphical conversion: file-picker dialog → JSON |
-| `launcher.py` | What `start.bat` actually runs: hidden backend + overlay + auto-shutdown |
+| `launcher.py` | What `start.bat` actually runs: hidden backend + overlay + topmost keep-alive + auto-shutdown |
 | `start.bat` | One-click startup (no console window; closing the overlay exits everything) |
 | `config.json` | Configuration (port, data dir, Resolve scripting path) |
 | `data/` | Course JSON data (private; not version-controlled) |
@@ -61,6 +61,19 @@ A native Windows "Open file" dialog appears (starting at your Desktop) — just 
 
 You can still **drag an `.xlsx` onto `convert.bat`** to skip the dialog and convert that file directly.
 
+**Method B: use the button in the overlay window** (no need to quit the plugin)
+
+The button in the bottom-right corner has two roles, decided by how many course JSONs exist in `data/`:
+
+| State | Button label | On click |
+|---|---|---|
+| `data/` has course files | **清除课件缓存** (clear cache) | Deletes every JSON under `data/` (and clears the in-memory cache) |
+| After clearing (or nothing there yet) | **选择课件** (pick course file) | Opens the very same file dialog as `convert.bat`, then converts |
+| Waiting for your file selection | 等待选择… (disabled) | — |
+
+So after clearing the cache you can re-import a course file **without restarting the plugin**; once
+the conversion finishes the button flips back to "clear cache".
+
 The converter parses every worksheet (treadmill / bike / rower / elliptical / bodyweight all supported) and writes the JSON files into `data/`.
 
 **Command line** (for scripting/debugging):
@@ -70,7 +83,7 @@ python convert_course.py "C:\path\to\course.xlsx"
 python xlsx_to_json.py "C:\path\to\course.xlsx"          # equivalent CLI-only entry point
 ```
 
-**Method B: hand-write JSON** (format below).
+**Method C: hand-write JSON** (format below).
 
 Key point: the JSON's **`course_name` field must match the DaVinci timeline name** (or contain it); the plugin matches by **equipment + course name** (see below).
 
@@ -91,7 +104,8 @@ python overlay.py    # start overlay
 
 - In Resolve, open a timeline named the same as the course, scrub the playhead, and the overlay shows the current intensity in real time.
 - The overlay opens in Edge's `--app` mode (frameless small window) by default.
-- For "always on top", use **Microsoft PowerToys → Always On Top** (Win+Ctrl+T) or any window-pinning tool.
+- The overlay is **always-on-top by default** (same effect as PowerToys Always On Top) — no
+  `Win+Ctrl+T` needed; turn it off with `always_on_top: false`.
 
 ## Deploying to Another Machine
 
@@ -114,6 +128,7 @@ This project is **portable** — no hard-coded user paths. Copy the whole folder
 | `overlay_idle_timeout` | Fallback: seconds without any frontend request before assuming the overlay is gone (covers browser crashes) | `90` |
 | `overlay_window_ratio` | Initial overlay size = screen work area × this ratio (`[width, height]`, about 1/7 of screen width) | `[0.135, 0.22]` |
 | `overlay_window_size` | Explicit initial overlay size in pixels (`[width, height]`; takes priority over the ratio) | `null` |
+| `always_on_top` | Keep the overlay always on top (built in — no PowerToys needed) | `true` |
 
 > The port can also be overridden with the `RESOLVE_SYNC_PORT` environment variable (useful for a second instance or automated tests).
 

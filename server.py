@@ -17,6 +17,7 @@
 
 import json
 import os
+import subprocess
 import sys
 import threading
 import multiprocessing as mp
@@ -67,6 +68,9 @@ def load_config():
         # 可在小屏上不至于占掉半个屏幕。也可以在 overlay_window_size 里直接写像素。
         "overlay_window_ratio": [0.135, 0.22],
         "overlay_window_size": None,
+        # 悬浮窗「始终置顶」（等价 PowerToys 的 Always On Top，免手动 Win+Ctrl+T）。
+        # 由 overlay.py 读取并生效，这里只是跟 config.json 保持同一份默认值。
+        "always_on_top": True,
     }
     if os.path.exists(cfg_path):
         with open(cfg_path, "r", encoding="utf-8") as f:
@@ -232,15 +236,32 @@ class CourseManager:
     def __init__(self, data_dir):
         self.data_dir = data_dir
         self._cache = {}  # {course_name: CourseData}
+        self.file_count = 0     # data_dir 下的课程 JSON 文件数（前端按钮状态用）
+        self._last_reload = 0.0
 
     def _reload(self):
+        files = list_course_files(self.data_dir)
+        self.file_count = len(files)
         self._cache = {}
-        for f in list_course_files(self.data_dir):
+        for f in files:
             try:
                 c = load_course(f)
                 self._cache[c.course_name] = c
             except Exception:
                 continue
+
+    def count(self):
+        """data_dir 下现有课程 JSON 文件数。
+
+        悬浮窗右下角按钮靠它决定显示「清除课件缓存」（>0）还是「选择课件」（=0）。
+        """
+        return self.file_count
+
+    def reload_now(self):
+        """立刻重新扫描 data_dir（转换/清空后调用，不必等 5 秒的定时重载）。"""
+        self._reload()
+        self._last_reload = time.time()
+        return self.file_count
 
     @staticmethod
     def _strip_punct(s: str) -> str:
@@ -307,9 +328,7 @@ class CourseManager:
             except OSError:
                 continue
         # 清空内存缓存并重载（此刻 data 已空，重载后 _cache 应为空）
-        self._cache = {}
-        self._last_reload = time.time()
-        remaining = len(list_course_files(self.data_dir))
+        remaining = self.reload_now()
         return removed, remaining
 
     def find(self, timeline_name: str):
@@ -403,6 +422,93 @@ class CourseManager:
 
 
 COURSES = CourseManager(CONFIG["data_dir"])
+
+
+# ---------- 前端触发的课件转换（POST /convert） ----------
+
+def _last_lines(text, lines=1):
+    """取文本最后若干非空行（用于把子进程的报错回显给用户）。"""
+    rows = [r.strip() for r in (text or "").splitlines() if r.strip()]
+    return "\n".join(rows[-lines:]) if rows else ""
+
+
+class ConvertJob:
+    """在后台线程里跑 convert_course.py，实现「在前端点按钮选课件」。
+
+    为什么是「后台线程 + 子进程」而不是在本进程里自己弹框转换：
+        1. 选文件框要等用户操作（可能几十秒），绝不能占住 HTTP 请求线程；
+        2. convert_course.py 就是双击 convert.bat 跑的那个入口，直接复用它，
+           前端按钮和 convert.bat 的行为就天然一致（同样的系统文件框、同样的
+           出错提示框、同样的 data/ 输出），不用维护两套逻辑。
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.running = False
+        self.ok = None         # None = 还没跑过；True/False = 上一次的结果
+        self.message = ""      # 给悬浮窗显示的一句话
+        self.count = 0         # 转换结束后 data/ 里的课件数
+
+    def snapshot(self):
+        with self._lock:
+            return {
+                "converting": self.running,
+                "convert_ok": self.ok,
+                "convert_message": self.message,
+            }
+
+    def start(self):
+        """发起一次转换；已经在跑就返回 False（避免弹两个文件框）。"""
+        with self._lock:
+            if self.running:
+                return False
+            self.running = True
+            self.ok = None
+            self.message = "已弹出选择窗口，请在窗口里选择课件表格…"
+        threading.Thread(target=self._run, daemon=True).start()
+        return True
+
+    def _run(self):
+        script = os.path.join(BASE_DIR, "convert_course.py")
+        env = dict(os.environ)
+        # 子进程 stdout 是管道时，Python 默认按系统代码页（GBK）编码，中文日志
+        # 会在回读时乱码，这里强制 UTF-8。
+        env["PYTHONIOENCODING"] = "utf-8"
+        out, code = "", -1
+        try:
+            proc = subprocess.run(
+                [sys.executable or "python", script],
+                cwd=BASE_DIR, env=env,
+                capture_output=True, text=True,
+                encoding="utf-8", errors="replace",
+                creationflags=0x08000000,   # CREATE_NO_WINDOW：不要多弹一个黑框
+            )
+            out = (proc.stdout or "") + "\n" + (proc.stderr or "")
+            code = proc.returncode
+        except Exception as e:
+            out = f"{type(e).__name__}: {e}"
+
+        # 转换完立刻重扫 data/：按钮状态和课程匹配都马上跟着更新，不用等 5 秒
+        count = COURSES.reload_now()
+        if count > 0:
+            ok, msg = True, f"已导入 {count} 个课件"
+        elif "已取消" in out:
+            ok, msg = False, "已取消：没有选择课件"
+        else:
+            ok, msg = False, (_last_lines(out) or "没有转换出任何课程数据")
+
+        with self._lock:
+            self.running = False
+            self.ok = ok
+            self.message = msg
+            self.count = count
+        print(f"[转换] ok={ok} count={count} msg={msg}", flush=True)
+        if code != 0:
+            print(f"[转换] 子进程退出码 {code}，输出尾部：\n{_last_lines(out, 6)}",
+                  flush=True)
+
+
+CONVERT = ConvertJob()
 
 
 # ---------- 达芬奇 worker（独立子进程，避免 fusionscript 的 GIL 阻塞主进程 HTTP） ----------
@@ -884,6 +990,10 @@ class Handler(BaseHTTPRequestHandler):
         s = STATE.snapshot()
         if self.path in ("/", "/state"):
             LIVENESS.beat()   # 前端在拉数据 = 前端还活着
+            # 悬浮窗右下角按钮的状态：课件数 > 0 显示「清除课件缓存」，
+            # == 0 显示「选择课件」；转换进行中则临时显示「等待选择…」。
+            s["course_count"] = COURSES.count()
+            s.update(CONVERT.snapshot())
             self._send_json(s)
         else:
             self.send_response(404)
@@ -911,6 +1021,23 @@ class Handler(BaseHTTPRequestHandler):
                 })
             except Exception as e:
                 self._send_json({"ok": False, "message": f"清除失败: {e}"})
+        elif self.path == "/convert":
+            # 前端「选择课件」按钮：后台起一个 convert_course.py（会弹系统文件框），
+            # 立刻返回，不让 HTTP 请求等着用户选文件；进度由 /state 的 converting
+            # 和 course_count 反映，前端据此把按钮切回来。
+            started = CONVERT.start()
+            if started:
+                self._send_json({
+                    "ok": True,
+                    "started": True,
+                    "message": "已弹出选择窗口，请在窗口里选择课件表格",
+                })
+            else:
+                self._send_json({
+                    "ok": False,
+                    "started": False,
+                    "message": "上一次转换还没结束，请先在弹窗里选择文件",
+                })
         elif self.path == "/shutdown":
             # 前端关窗（pagehide）时用 sendBeacon 打过来 → 后端自行退出
             self._send_json({"ok": True})

@@ -28,14 +28,14 @@ overlay.html  ── 暗色悬浮窗，实时渲染
 
 | 文件 | 作用 |
 |---|---|
-| `server.py` | 后端：连达芬奇 + 轮询时间码 + 匹配课程 + 本地 HTTP |
+| `server.py` | 后端：连达芬奇 + 轮询时间码 + 匹配课程 + 本地 HTTP（含清缓存/选课件端点） |
 | `resolve_connection.py` | 封装达芬奇 Scripting API |
 | `course_data.py` | 课程数据加载 + 按时间阶梯查询 |
 | `equipment_config.py` | 器械字段配置（跑步机/单车/划船机/椭圆机/徒手） |
-| `overlay.html` / `overlay.py` | 暗色悬浮窗 + Edge app 模式启动器 |
+| `overlay.html` / `overlay.py` | 暗色悬浮窗 + Edge app 启动器（自动置顶 / 自动纠正尺寸） |
 | `xlsx_to_json.py` | **把课件 xlsx 转成插件 JSON**（命令行入口） |
 | `convert_course.py` / `convert.bat` | 图形化转换：弹文件选择框 → 生成 JSON |
-| `launcher.py` | `start.bat` 背后真正干活的：后台起后端 + 开悬浮窗 + 关窗收尾 |
+| `launcher.py` | `start.bat` 背后真正干活的：后台起后端 + 开悬浮窗 + 持续保置顶 + 关窗收尾 |
 | `start.bat` | 一键启动（无黑框；关掉悬浮窗即全部退出） |
 | `config.json` | 配置（端口、数据目录、达芬奇脚本路径） |
 | `data/` | 课程 JSON 数据（私密业务数据，不纳入版本管理） |
@@ -61,6 +61,18 @@ overlay.html  ── 暗色悬浮窗，实时渲染
 
 也可以把任意位置的 xlsx **直接拖到 `convert.bat` 上**，会跳过选择框、直接转换该文件。
 
+**方式 B：在悬浮窗里点按钮**（插件开着时最方便，不用退出插件）
+
+悬浮窗右下角的按钮有「两种身份」，由 `data/` 里现有课件数自动决定：
+
+| 状态 | 按钮显示 | 点击后 |
+|---|---|---|
+| `data/` 里有课件 | **清除课件缓存** | 清空 `data/` 下所有转换出的 JSON（并清内存缓存） |
+| 清空后（或一开始就没数据） | **选择课件** | 弹出和 `convert.bat` 完全相同的文件选择框 → 自动转换 |
+| 正在等你选文件 | 等待选择…（禁用） | — |
+
+也就是说：**清完缓存不用退出插件，直接再点一下就能重新导入课件**；转换成功后按钮自动变回「清除课件缓存」。
+
 转换脚本会解析所有工作表（跑步机/单车/划船机/椭圆机/徒手均支持），生成对应 JSON 到 `data/` 目录。
 
 **命令行方式**（调试用）：
@@ -70,7 +82,7 @@ python convert_course.py "C:\path\to\冠军课程课件.xlsx"
 python xlsx_to_json.py "C:\path\to\冠军课程课件.xlsx"          # 等价的纯命令行入口
 ```
 
-**方式 B：手写 JSON**（格式见下文「数据格式」）。
+**方式 C：手写 JSON**（格式见下文「数据格式」）。
 
 关键点：JSON 里的 **`course_name` 字段必须和达芬奇时间线名称一致**（或互为包含），插件按**器械 + 课程名**匹配（详见下文）。
 
@@ -90,8 +102,10 @@ python overlay.py    # 启动悬浮窗
 ### 4. 使用
 
 - 在达芬奇里打开与课程同名的时间线，拖动播放头，悬浮窗即实时显示当前强度。
-- 悬浮窗默认用 Edge 的 `--app` 模式打开（无边框小窗）。
-- 需要「始终置顶」时，可用 **Microsoft PowerToys → Always On Top**（Win+Ctrl+T）或任意置顶工具。
+- 悬浮窗默认用 Edge 的 `--app` 模式打开（无边框小窗），并**自动「始终置顶」**——效果等同
+  PowerToys 的 Always On Top，不用再手动按 `Win+Ctrl+T`（可用 `always_on_top: false` 关掉）。
+- 置顶与尺寸由 `overlay.py` 用 Win32 `SetWindowPos` 设置，`launcher.py` 每秒复查一次：
+  万一被别的程序顶掉或尺寸被 Edge 打回，1 秒内自动恢复。
 
 ## 配置（config.json）
 
@@ -105,6 +119,7 @@ python overlay.py    # 启动悬浮窗
 | `overlay_idle_timeout` | 兜底：前端多少秒无请求就认定已关闭（应对浏览器崩溃） | `90` |
 | `overlay_window_ratio` | 悬浮窗初始尺寸 = 屏幕工作区 × 该比例（`[宽, 高]`，约屏宽 1/7、屏高 1/5） | `[0.135, 0.22]` |
 | `overlay_window_size` | 直接指定悬浮窗初始尺寸（像素，`[宽, 高]`；优先级高于上面的比例） | `null` |
+| `always_on_top` | 悬浮窗是否「始终置顶」（自带置顶，无需 PowerToys） | `true` |
 
 > 端口也可以用环境变量 `RESOLVE_SYNC_PORT` 临时覆盖（跑第二个实例或自动化测试时有用）。
 
@@ -167,7 +182,9 @@ C:\ProgramData\Blackmagic Design\DaVinci Resolve\Support\Developer\Scripting\Mod
 - **悬浮窗显示「无法连接服务」**：先运行 `server.py`。
 - **状态一直「正在连接达芬奇」**：确认达芬奇已启动、外部脚本已开启为 Local。
 - **找不到同名课程**：检查 `course_name` 与时间线名称是否一致（或互为包含）。
-- **窗口不置顶**：Edge `--app` 模式本身不保证置顶，用 PowerToys 的 Always On Top 快捷键。
+- **不想置顶**：`config.json` 里 `"always_on_top": false`。
+- **按钮一直是「等待选择…」**：文件选择框已经弹出来了但可能被挡在后面，切到桌面找一下；
+  选完或取消后按钮会自己恢复。
 - **徒手类课件未转换**：徒手训练按「个数」计数、无器械指标且时间轴不完整，暂不支持自动转换，需另行设计。
 
 ## 版本说明
@@ -180,7 +197,6 @@ C:\ProgramData\Blackmagic Design\DaVinci Resolve\Support\Developer\Scripting\Mod
 
 - **不同语言课件适配**：可配置的表头/标签识别 + 器械名前缀匹配，支持非中文课件。
 - **徒手课件适配**：为「按个数/组数」计数的训练设计独立数据模型（无器械指标、时间轴不连续）。
-- **前端优化 + 清除课件缓存**：内存课程缓存、`data/` 重载、"清除缓存"端点。
 
 ## 许可
 

@@ -7,7 +7,7 @@ launcher.py —— 一键启动（start.bat 调用的就是它）。
 背后做四件事：
     1. 以「后台无窗口」方式启动 server.py（不再弹命令行黑框）；
     2. 轮询后端 /ping，等它真正就绪再开窗（避免悬浮窗先开、一直显示连不上）；
-    3. 用 Edge 的 --app 模式打开悬浮窗；
+    3. 用 Edge 的 --app 模式打开悬浮窗（自带「始终置顶」，无需手动 Win+Ctrl+T）；
     4. 盯着悬浮窗：一旦窗口消失，就结束后端进程，然后自己退出。
 
 后端自己也有一套「前端失联就退出」的兜底（见 server.py 的 Liveness），
@@ -304,6 +304,9 @@ def main(argv=None):
     state = "wait_appear"
     appear_deadline = time.time() + 40
     misses = 0
+    win_size = overlay.compute_window_size()
+    topmost = overlay.always_on_top_enabled()
+    last_keep = 0.0
 
     while True:
         if proc.poll() is not None:
@@ -322,6 +325,11 @@ def main(argv=None):
         elif state == "monitor":
             if overlay_window_exists():
                 misses = 0
+                # 周期性复查「置顶 + 尺寸」：置顶状态可能被别的程序顶掉，
+                # 尺寸也可能被 Edge 自己套回记忆值。真不对时才动窗口。
+                if time.time() - last_keep >= 1.0:
+                    last_keep = time.time()
+                    overlay.keep_on_top(size=win_size, topmost=topmost)
             else:
                 misses += 1
                 if misses >= 3:      # 连续 3 秒找不到，认定用户关掉了
