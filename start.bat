@@ -1,12 +1,7 @@
 @echo off
-title 课程强度同步
+rem 注意：本窗口标题不要包含「课程强度同步」——launcher 靠窗口标题判断悬浮窗是否被关闭。
+title 插件启动器
 cd /d "%~dp0"
-
-rem ===== 杀干净占用 8765 端口的旧 server 进程（防止改完代码后仍连到旧进程） =====
-for /f "tokens=5" %%a in ('netstat -aon ^| findstr ":8765" ^| findstr "LISTENING"') do (
-    echo [清理] 杀掉旧 server 进程 PID=%%a
-    taskkill /F /PID %%a >nul 2>nul
-)
 
 rem ===== 自动定位 Python 解释器（可移植：不再写死本机用户路径） =====
 rem 达芬奇 fusionscript 仅兼容 Python 3.10 / 3.11，因此优先找 3.11，其次 3.10。
@@ -20,28 +15,30 @@ rem 3) 最后回退：py 启动器默认版本
 if "%PY%"=="" where py >nul 2>nul && set "PY=py -3"
 
 if "%PY%"=="" (
-    echo [错误] 未找到 Python，请先安装 Python 3.x
+    echo [错误] 未找到 Python，请先安装 Python 3.10 或 3.11
     echo.
     pause
     exit /b 1
 )
+
+rem ===== 选择启动命令 =====
+rem PY 是完整路径时，优先用同目录的 pythonw.exe —— 完全不会出现控制台窗口；
+rem 否则（PY 形如 py -3）直接用 PY 跑，launcher 会立刻把自己的控制台隐藏。
+rem 注意引号：完整路径可能带空格，必须加引号；"py -3" 这种带参数的命令则不能加。
+set "LAUNCH=%PY%"
+if exist "%PY%" for %%d in ("%PY%") do if exist "%%~dpdpythonw.exe" set "LAUNCH="%%~dpdpythonw.exe""
 
 echo ============================================
 echo   课程强度同步插件 - 一键启动
 echo   使用 Python: %PY%
 echo ============================================
 echo.
-
-echo [1/2] 启动后端服务 (server.py)...
-start "课程强度同步-后端" cmd /k %PY% server.py
-
-echo [2/2] 启动悬浮窗 (overlay.py)...
-timeout /t 2 /nobreak >nul
-%PY% overlay.py
-
+echo 后端会在后台静默运行，稍等片刻会自动弹出悬浮窗。
+echo 关掉悬浮窗，后端会自动退出（不会留下后台进程）。
 echo.
-echo 全部启动完成。
-echo - 请确认达芬奇已启动，并已开启"外部脚本"(External scripting = Local)。
-echo - 悬浮窗会实时跟随达芬奇播放头显示当前强度。
-echo.
-pause
+
+rem ===== 启动 launcher：它负责「后台起后端 + 开悬浮窗 + 关窗自动收尾」 =====
+start "" /min %LAUNCH% launcher.py
+
+rem 本窗口使命完成，立刻关掉（launcher 是独立进程，不受影响）
+exit /b 0

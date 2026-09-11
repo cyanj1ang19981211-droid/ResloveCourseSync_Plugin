@@ -3,5 +3,7 @@
   "resolve_script_lib": null,
   "data_dir": "data",
   "port": 8765,
-  "poll_interval": 0.1
+  "poll_interval": 0.1,
+  "auto_exit_on_overlay_close": true,
+  "overlay_idle_timeout": 90
 }

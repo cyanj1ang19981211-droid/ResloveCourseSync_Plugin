@@ -378,6 +378,68 @@ def parse_sheet(sheet_name, rows):
     return course
 
 
+def convert_file(xlsx_path, only_sheet=None, out_dir=None, log=print):
+    """把课件 xlsx 转成 data/*.json，返回转换统计。
+
+    与命令行入口解耦，方便 convert_course.py（图形化选择）直接复用。
+
+    参数：
+        xlsx_path  : 课件表格路径
+        only_sheet : 只转某个工作表（支持模糊匹配）；None 表示全部转
+        out_dir    : 输出目录，默认 <脚本目录>/data
+        log        : 日志输出函数（默认 print）
+
+    返回：
+        {"ok": 成功数, "skipped": [(表名, 原因), ...], "outputs": [json 文件名, ...]}
+
+    异常：
+        文件不存在 / 读不出工作表 → 抛 ValueError，由调用方决定怎么提示。
+    """
+    if not xlsx_path or not os.path.exists(xlsx_path):
+        raise ValueError(f"找不到课件文件：{xlsx_path}")
+
+    if out_dir is None:
+        out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+    os.makedirs(out_dir, exist_ok=True)
+
+    all_sheets = parse_xlsx(xlsx_path)
+    if not all_sheets:
+        raise ValueError("表格里没有读到任何工作表，请确认这是课程课件文件。")
+
+    targets = {}
+    if only_sheet:
+        # 支持精确名或模糊匹配
+        for name in all_sheets:
+            if name == only_sheet or only_sheet in name:
+                targets[name] = all_sheets[name]
+        if not targets:
+            raise ValueError(f"未找到工作表「{only_sheet}」，可用工作表：{list(all_sheets.keys())}")
+    else:
+        targets = all_sheets
+
+    result = {"ok": 0, "skipped": [], "outputs": []}
+    for sheet_name, rows in targets.items():
+        try:
+            course = parse_sheet(sheet_name, rows)
+        except ValueError as e:
+            log(f"跳过 {sheet_name}：{e}")
+            result["skipped"].append((sheet_name, str(e)))
+            continue
+        # 文件名用课程名（去掉可能存在的换行/空格）
+        fname = course["course_name"].replace("\n", "").strip()
+        out_path = os.path.join(out_dir, fname + ".json")
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(course, f, ensure_ascii=False, indent=2)
+        n_seg = len(course["segments"])
+        n_pt = len(course["points"])
+        log(f"  {sheet_name}  ->  {os.path.basename(out_path)}  "
+            f"({course['equipment']}, {course['duration']}s, {n_seg}环节, {n_pt}点)")
+        result["ok"] += 1
+        result["outputs"].append(os.path.basename(out_path))
+
+    return result
+
+
 def main():
     # 无参数时，默认找桌面上的「冠军课程课件.xlsx」（方便双击 convert.bat 直接转换）
     if len(sys.argv) < 2:
@@ -393,39 +455,11 @@ def main():
         xlsx_path = sys.argv[1]
     only_sheet = sys.argv[2] if len(sys.argv) > 2 else None
 
-    out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
-    os.makedirs(out_dir, exist_ok=True)
-
-    all_sheets = parse_xlsx(xlsx_path)
-
-    targets = {}
-    if only_sheet:
-        # 支持精确名或模糊匹配
-        for name in all_sheets:
-            if name == only_sheet or only_sheet in name:
-                targets[name] = all_sheets[name]
-        if not targets:
-            print(f"未找到工作表: {only_sheet}")
-            print("可用工作表:", list(all_sheets.keys()))
-            sys.exit(1)
-    else:
-        targets = all_sheets
-
-    for sheet_name, rows in targets.items():
-        try:
-            course = parse_sheet(sheet_name, rows)
-        except ValueError as e:
-            print(f"⚠ 跳过 {sheet_name}：{e}")
-            continue
-        # 文件名用课程名（去掉可能存在的换行/空格）
-        fname = course["course_name"].replace("\n", "").strip()
-        out_path = os.path.join(out_dir, fname + ".json")
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(course, f, ensure_ascii=False, indent=2)
-        n_seg = len(course["segments"])
-        n_pt = len(course["points"])
-        print(f"✓ {sheet_name}  ->  {os.path.basename(out_path)}  "
-              f"({course['equipment']}, {course['duration']}s, {n_seg}环节, {n_pt}点)")
+    try:
+        convert_file(xlsx_path, only_sheet=only_sheet)
+    except ValueError as e:
+        print(f"[错误] {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

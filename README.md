@@ -32,9 +32,11 @@ overlay.html  ── dark overlay window, real-time rendering
 | `resolve_connection.py` | Wrapper around the DaVinci Resolve Scripting API |
 | `course_data.py` | Course data loading + stepped (time-based) queries |
 | `equipment_config.py` | Equipment field configuration (treadmill / bike / rower / elliptical / bodyweight) |
-| `overlay.html` / `overlay.py` | Dark overlay window + launcher |
-| `xlsx_to_json.py` | **Converts course `.xlsx` files into plugin JSON** |
-| `start.bat` | One-click startup for backend + overlay |
+| `overlay.html` / `overlay.py` | Dark overlay window + Edge app-mode launcher |
+| `xlsx_to_json.py` | **Converts course `.xlsx` files into plugin JSON** (command-line entry) |
+| `convert_course.py` / `convert.bat` | Graphical conversion: file-picker dialog → JSON |
+| `launcher.py` | What `start.bat` actually runs: hidden backend + overlay + auto-shutdown |
+| `start.bat` | One-click startup (no console window; closing the overlay exits everything) |
 | `config.json` | Configuration (port, data dir, Resolve scripting path) |
 | `data/` | Course JSON data (private; not version-controlled) |
 
@@ -53,24 +55,33 @@ In Resolve: **DaVinci Resolve → Preferences → System → General**, set
 
 ### 2. Prepare Course Data (two ways)
 
-**Method A (recommended): convert the course `.xlsx` directly**
+**Method A (recommended): double-click `convert.bat` and pick the course file in the dialog**
+
+A native Windows "Open file" dialog appears (starting at your Desktop) — just select the course workbook. No paths to remember, no drag-and-drop required.
+
+You can still **drag an `.xlsx` onto `convert.bat`** to skip the dialog and convert that file directly.
+
+The converter parses every worksheet (treadmill / bike / rower / elliptical / bodyweight all supported) and writes the JSON files into `data/`.
+
+**Command line** (for scripting/debugging):
 
 ```bat
-python xlsx_to_json.py "C:\path\to\course.xlsx"
+python convert_course.py "C:\path\to\course.xlsx"
+python xlsx_to_json.py "C:\path\to\course.xlsx"          # equivalent CLI-only entry point
 ```
-
-The script parses all equipment-based course sheets and generates corresponding JSON into the `data/` directory.
-(Treadmill / bike / rower / elliptical are supported; bodyweight courses have a different structure and are not auto-converted yet.)
 
 **Method B: hand-write JSON** (format below).
 
-Key point: the JSON's **`course_name` field must match the DaVinci timeline name** (or contain it); the plugin matches by name automatically.
+Key point: the JSON's **`course_name` field must match the DaVinci timeline name** (or contain it); the plugin matches by **equipment + course name** (see below).
 
 ### 3. Start
 
-Double-click **`start.bat`** (starts backend + overlay in one click).
+Double-click **`start.bat`** — that's it.
 
-Or manually, in two steps:
+- The backend runs **silently in the background with no console window**; its log goes to `.runtime/server.log`.
+- The overlay window appears a moment later. **Closing the overlay shuts the backend down automatically** — no leftover process holding the port.
+
+Or manually, in two steps (useful for debugging; the backend then stays visible and does not exit with the overlay):
 ```bat
 python server.py     # start backend
 python overlay.py    # start overlay
@@ -99,6 +110,10 @@ This project is **portable** — no hard-coded user paths. Copy the whole folder
 | `data_dir` | Course data directory | `data` |
 | `port` | Local server port | `8765` |
 | `poll_interval` | Polling interval (seconds) | `0.1` |
+| `auto_exit_on_overlay_close` | Shut the backend down when the overlay window closes (set `false` when running `server.py` manually for debugging) | `true` |
+| `overlay_idle_timeout` | Fallback: seconds without any frontend request before assuming the overlay is gone (covers browser crashes) | `90` |
+
+> The port can also be overridden with the `RESOLVE_SYNC_PORT` environment variable (useful for a second instance or automated tests).
 
 The Resolve scripting module is commonly located at:
 ```

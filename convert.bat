@@ -16,21 +16,17 @@ if "%PY%"=="" (
     exit /b 1
 )
 
-echo ============================================
-echo   课件数据转换 (xlsx -^> JSON)
-echo   默认转换桌面上的「冠军课程课件.xlsx」
-echo ============================================
-echo.
-
+rem 带参数时（把 xlsx 拖到本文件上）→ 直接转换该文件；
+rem 不带参数时（双击）→ 弹出文件选择框，让用户挑课件。
 if "%~1"=="" (
-    echo 未指定文件，将转换桌面上的「冠军课程课件.xlsx」
-    %PY% xlsx_to_json.py
+    %PY% convert_course.py
 ) else (
-    echo 转换文件: %~1
-    %PY% xlsx_to_json.py "%~1"
+    %PY% convert_course.py "%~1"
 )
 
+set "RC=%ERRORLEVEL%"
 echo.
-echo 转换完成，生成的 JSON 已保存到 data 目录。
-echo.
-pause
+if not "%RC%"=="0" echo 转换未完全成功，请把上面的提示截图反馈。
+echo 按任意键关闭本窗口...
+pause >nul
+exit /b %RC%

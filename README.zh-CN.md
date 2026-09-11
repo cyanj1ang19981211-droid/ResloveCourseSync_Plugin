@@ -32,16 +32,18 @@ overlay.html  ── 暗色悬浮窗，实时渲染
 | `resolve_connection.py` | 封装达芬奇 Scripting API |
 | `course_data.py` | 课程数据加载 + 按时间阶梯查询 |
 | `equipment_config.py` | 器械字段配置（跑步机/单车/划船机/椭圆机/徒手） |
-| `overlay.html` / `overlay.py` | 暗色悬浮窗 + 启动器 |
-| `xlsx_to_json.py` | **把课件 xlsx 自动转成插件 JSON** |
-| `start.bat` | 一键启动后端 + 悬浮窗 |
+| `overlay.html` / `overlay.py` | 暗色悬浮窗 + Edge app 模式启动器 |
+| `xlsx_to_json.py` | **把课件 xlsx 转成插件 JSON**（命令行入口） |
+| `convert_course.py` / `convert.bat` | 图形化转换：弹文件选择框 → 生成 JSON |
+| `launcher.py` | `start.bat` 背后真正干活的：后台起后端 + 开悬浮窗 + 关窗收尾 |
+| `start.bat` | 一键启动（无黑框；关掉悬浮窗即全部退出） |
 | `config.json` | 配置（端口、数据目录、达芬奇脚本路径） |
 | `data/` | 课程 JSON 数据（私密业务数据，不纳入版本管理） |
 
 ## 环境要求
 
 - Windows + DaVinci Resolve（Studio 或免费版均可，需支持 Scripting API）。
-- Python 3.7+。
+- Python **3.10 或 3.11**（必须——达芬奇的 `fusionscript` 模块只支持这两个版本，3.12+ 会崩）。
 - 无需第三方 Python 库（纯标准库实现）。
 
 ## 使用步骤
@@ -53,24 +55,33 @@ overlay.html  ── 暗色悬浮窗，实时渲染
 
 ### 2. 准备课程数据（两种方式）
 
-**方式 A（推荐）：直接转换课件 xlsx**
+**方式 A（推荐）：双击 `convert.bat`，在弹出的文件选择框里挑课件**
+
+双击后会弹出 Windows 原生的「打开文件」对话框（默认定位到桌面），选中课件表格即可转换，不用记路径、也不用拖拽。
+
+也可以把任意位置的 xlsx **直接拖到 `convert.bat` 上**，会跳过选择框、直接转换该文件。
+
+转换脚本会解析所有工作表（跑步机/单车/划船机/椭圆机/徒手均支持），生成对应 JSON 到 `data/` 目录。
+
+**命令行方式**（调试用）：
 
 ```bat
-python xlsx_to_json.py "C:\path\to\冠军课程课件.xlsx"
+python convert_course.py "C:\path\to\冠军课程课件.xlsx"
+python xlsx_to_json.py "C:\path\to\冠军课程课件.xlsx"          # 等价的纯命令行入口
 ```
-
-脚本会解析所有器械类课件表，生成对应 JSON 到 `data/` 目录。
-（跑步机/单车/划船机/椭圆机已支持；徒手类课件结构不同，暂未自动转换。）
 
 **方式 B：手写 JSON**（格式见下文「数据格式」）。
 
-关键点：JSON 里的 **`course_name` 字段必须和达芬奇时间线名称一致**（或互为包含），插件按名称自动匹配。
+关键点：JSON 里的 **`course_name` 字段必须和达芬奇时间线名称一致**（或互为包含），插件按**器械 + 课程名**匹配（详见下文）。
 
 ### 3. 启动
 
-双击 **`start.bat`**（一键启动后端 + 悬浮窗）。
+双击 **`start.bat`** 即可（一键启动后端 + 悬浮窗）。
 
-或手动分两步：
+- 后端在**后台静默运行，不会弹出黑色命令行窗口**；日志写在 `.runtime/server.log`。
+- 稍等片刻会自动弹出悬浮窗，**关掉悬浮窗后端就会自动退出**，不会残留后台进程占着端口。
+
+或手动分两步（调试时用，此时后端有可见输出、且不随前端退出）：
 ```bat
 python server.py     # 启动后端
 python overlay.py    # 启动悬浮窗
@@ -90,6 +101,10 @@ python overlay.py    # 启动悬浮窗
 | `data_dir` | 课程数据目录 | `data` |
 | `port` | 本地服务端口 | `8765` |
 | `poll_interval` | 轮询间隔（秒） | `0.1` |
+| `auto_exit_on_overlay_close` | 关掉悬浮窗后是否自动结束后端（手动跑 `server.py` 调试时可设 `false`） | `true` |
+| `overlay_idle_timeout` | 兜底：前端多少秒无请求就认定已关闭（应对浏览器崩溃） | `90` |
+
+> 端口也可以用环境变量 `RESOLVE_SYNC_PORT` 临时覆盖（跑第二个实例或自动化测试时有用）。
 
 达芬奇 scripting 模块常见位置：
 ```

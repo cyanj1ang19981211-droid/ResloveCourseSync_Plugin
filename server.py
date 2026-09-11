@@ -56,15 +56,110 @@ def load_config():
         "data_dir": os.path.join(BASE_DIR, "data"),
         "port": 8765,
         "poll_interval": 0.1,               # 轮询间隔（秒）
+        # 关掉悬浮窗后是否自动结束后端进程（配合 start.bat 后台启动用）。
+        # 手动 `python server.py` 调试时可以设成 false，让服务一直留着。
+        "auto_exit_on_overlay_close": True,
+        # 兜底：前端超过这么多秒没有任何请求，就认为它已经没了（应对浏览器崩溃等
+        # 收不到关闭信号的极端情况）。取 90s 是因为浏览器对最小化/后台的页面会把
+        # 定时器降频到每分钟一次，超时太短会误杀。
+        "overlay_idle_timeout": 90,
     }
     if os.path.exists(cfg_path):
         with open(cfg_path, "r", encoding="utf-8") as f:
             user = json.load(f)
         default.update(user)
+
+    # 允许用环境变量临时改端口（跑第二个实例 / 自动化测试时用）
+    env_port = os.environ.get("RESOLVE_SYNC_PORT")
+    if env_port and env_port.isdigit():
+        default["port"] = int(env_port)
+
+    # data_dir 允许写相对路径（配置里就是 "data"）。统一按项目目录解析，
+    # 这样从任意工作目录启动（比如 launcher 拉起的子进程）都能找到 data/。
+    dd = default.get("data_dir")
+    if dd and not os.path.isabs(dd):
+        default["data_dir"] = os.path.join(BASE_DIR, dd)
+
     return default
 
 
 CONFIG = load_config()
+
+
+# ---------- 前端存活检测（关掉悬浮窗后自动退出后端） ----------
+
+class Liveness:
+    """跟前端「对表」：前端还在拉数据就活着，前端关窗就结束后端进程。
+
+    背景：一键启动（start.bat）时后端是**后台无窗口**进程。用户关掉悬浮窗后如果
+    后端还赖着不走，就会变成看不见的僵尸进程，下次启动还占着 8765 端口。
+
+    双保险：
+        1. 前端真正关窗时，overlay.html 用 sendBeacon 打 /shutdown → 立刻退出；
+        2. 万一信号没送到（浏览器崩溃/被强杀），超过 idle_timeout 没有前端请求
+           也自动退出。
+
+    注意：只有「曾经有前端连过」才会因空闲退出。手动跑 `python server.py` 调试、
+    还没打开过悬浮窗时，进程会一直留着，不会被误杀。
+    """
+
+    def __init__(self, enabled: bool, idle_timeout: float):
+        self._lock = threading.Lock()
+        self._last_seen = 0.0
+        self._seen = False
+        self._shutdown_at = 0.0     # 收到关闭信号的时间；0 表示没有待处理的退出
+        self.enabled = bool(enabled)
+        self.idle_timeout = float(idle_timeout)
+        # 收到关闭信号后先等这么久再退：页面按 F5 刷新时 pagehide 也会触发，
+        # 刷新后立刻又有 /state 心跳进来 → 撤销退出，不会把后端误杀。
+        self.shutdown_grace = 2.5
+
+    def beat(self):
+        """记录一次前端心跳（前端每次拉 /state 都算）。"""
+        with self._lock:
+            self._seen = True
+            self._last_seen = time.time()
+            if self._shutdown_at:
+                # 页面又活了（多半是刷新/重新加载）→ 撤销刚才的退出请求
+                self._shutdown_at = 0.0
+
+    def request_shutdown(self):
+        """前端关窗时调用：标记待退出，交给 watchdog 在宽限期后执行。"""
+        with self._lock:
+            if not self._shutdown_at:
+                self._shutdown_at = time.time()
+
+    def watchdog(self):
+        """后台线程：处理「前端关窗」与「前端失联」两种情况下的退出。"""
+        while True:
+            time.sleep(0.5)
+            if not self.enabled:
+                continue
+            now = time.time()
+            with self._lock:
+                seen = self._seen
+                last = self._last_seen
+                pending = self._shutdown_at
+            if pending and (now - pending) > self.shutdown_grace:
+                self._exit("收到前端关闭信号")
+            if seen and (now - last) > self.idle_timeout:
+                self._exit(f"前端已 {self.idle_timeout:.0f} 秒无响应")
+
+    @staticmethod
+    def _exit(reason: str):
+        print(f"[退出] {reason}，后端结束。", flush=True)
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass
+        os._exit(0)   # 直接退出：HTTP 线程/worker 子进程都由它带走
+
+
+LIVENESS = Liveness(
+    enabled=CONFIG.get("auto_exit_on_overlay_close", True),
+    idle_timeout=CONFIG.get("overlay_idle_timeout", 90),
+)
 
 
 # ---------- 全局状态（线程安全） ----------
@@ -650,14 +745,30 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
+        if self.path == "/ping":
+            # 就绪探测（launcher 启动时用）。**不算心跳**，避免「只探测没开窗」
+            # 也被当成前端还活着。
+            self._send_json({"ok": True})
+            return
+
         s = STATE.snapshot()
         if self.path in ("/", "/state"):
+            LIVENESS.beat()   # 前端在拉数据 = 前端还活着
             self._send_json(s)
         else:
             self.send_response(404)
             self.end_headers()
 
     def do_POST(self):
+        # 先把请求体读掉：sendBeacon 会带一个 body，不读干净会残留在连接里，
+        # 影响这条 keep-alive 连接上的后续请求。
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+            if n > 0:
+                self.rfile.read(n)
+        except Exception:
+            pass
+
         # 清除课件缓存：删除 data_dir 下所有转换生成的 JSON
         if self.path == "/clear_cache":
             try:
@@ -670,6 +781,10 @@ class Handler(BaseHTTPRequestHandler):
                 })
             except Exception as e:
                 self._send_json({"ok": False, "message": f"清除失败: {e}"})
+        elif self.path == "/shutdown":
+            # 前端关窗（pagehide）时用 sendBeacon 打过来 → 后端自行退出
+            self._send_json({"ok": True})
+            LIVENESS.request_shutdown()
         else:
             self.send_response(404)
             self.end_headers()
@@ -678,11 +793,34 @@ class Handler(BaseHTTPRequestHandler):
         pass  # 静默日志
 
 
+class _SyncHTTPServer(ThreadingHTTPServer):
+    """多线程 HTTP 服务器，但**关掉端口复用**。
+
+    为什么：Windows 上 allow_reuse_address（SO_REUSEADDR）的语义是「允许绑定一个
+    已被别人监听的端口」。结果就是旧后端没被杀干净时，新后端会"看似启动成功"，
+    而请求可能落到旧进程上——表现就是「改了代码却像没生效」「数据是旧的」。
+
+    关掉之后端口被占就直接报错，配合 launcher 的清理逻辑，行为可预期。
+    """
+    allow_reuse_address = False
+    daemon_threads = True
+
+
 def start_server():
     # 用多线程 HTTP 服务器：fusionscript 的 native 调用会长时间持有 GIL，
     # 单线程模式会导致 HTTP 响应被阻塞，客户端 fetch 失败。
-    server = ThreadingHTTPServer(("127.0.0.1", CONFIG["port"]), Handler)
+    try:
+        server = _SyncHTTPServer(("127.0.0.1", CONFIG["port"]), Handler)
+    except OSError as e:
+        print(f"[错误] 无法监听端口 {CONFIG['port']}：{e}", flush=True)
+        print("      多半是上一个后端没退干净。重新双击 start.bat 即可（它会先清理）。",
+              flush=True)
+        raise
+
     print(f"[课程强度同步] HTTP 服务已启动: http://127.0.0.1:{CONFIG['port']}")
+    if LIVENESS.enabled:
+        print(f"[课程强度同步] 悬浮窗关闭后自动退出已开启"
+              f"（兜底空闲 {LIVENESS.idle_timeout:.0f}s）")
     server.serve_forever()
 
 
@@ -690,6 +828,10 @@ if __name__ == "__main__":
     # 后台线程：达芬奇轮询
     t = threading.Thread(target=resolve_loop, daemon=True)
     t.start()
+
+    # 后台线程：前端存活检测（关掉悬浮窗 → 自动退出）
+    tw = threading.Thread(target=LIVENESS.watchdog, daemon=True)
+    tw.start()
 
     # 前台：HTTP 服务
     try:

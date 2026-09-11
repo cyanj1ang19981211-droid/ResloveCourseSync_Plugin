@@ -34,6 +34,9 @@ config.local.json
 *.tmp
 *.cache
 
+# 运行时目录（后端日志等，start.bat 启动时自动生成）
+.runtime/
+
 # 探针诊断脚本（临时调试用，非正式功能）
 probe_raw.py
 
