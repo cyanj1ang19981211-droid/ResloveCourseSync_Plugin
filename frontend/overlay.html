@@ -662,12 +662,19 @@ const PICK_TEXT = "选择课件";
 
 let courseCount = 0;        // 后端 data/ 里现有的课件 JSON 数
 let converting = false;     // 是否正在等用户选课件 / 转换中
+let clearing = false;       // 正在执行清除（避免 150ms 轮询把"清除中…"覆盖掉）
 let lastConvertMsg = "";    // 上一次转换结果（用于判断"有新结果"）
 let noticeText = "";        // 短暂提示（优先显示在状态栏，几秒后自动消失）
 let noticeUntil = 0;
 
 function renderActionButton() {
   const btn = el.clearBtn;
+  if (clearing) {
+    btn.disabled = true;
+    btn.textContent = "清除中…";
+    btn.className = "clear-btn busy";
+    return;
+  }
   if (converting) {
     btn.disabled = true;
     btn.textContent = "等待选择…";
@@ -724,8 +731,8 @@ async function clearCache() {
   );
   if (!sure) return;
 
-  el.clearBtn.disabled = true;
-  el.clearBtn.textContent = "清除中…";
+  clearing = true;
+  renderActionButton();
   el.status.textContent = "正在清除课件缓存…";
 
   try {
@@ -741,12 +748,13 @@ async function clearCache() {
   } catch (e) {
     setNotice("清除失败：无法连接服务");
   } finally {
+    clearing = false;
     renderActionButton();
   }
 }
 
 function onActionClick() {
-  if (converting) return;
+  if (converting || clearing) return;
   if (courseCount > 0) clearCache();
   else chooseCourse();
 }
