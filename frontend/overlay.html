@@ -49,6 +49,28 @@
   .dot.on { background: var(--green); box-shadow: 0 0 6px var(--green); }
   .header .title { font-size: 12px; font-weight: 600; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
+  /* 图钉：切换「始终置顶」。亮 = 置顶中（压在达芬奇上面），灭 = 普通窗口，
+     可以被别的窗口盖住、也能正常最小化。 */
+  .pin-btn {
+    flex: 0 0 auto;
+    width: 22px; height: 22px;
+    display: flex; align-items: center; justify-content: center;
+    padding: 0;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 5px;
+    color: var(--muted);
+    cursor: pointer;
+    transition: color .15s, background .15s, border-color .15s;
+  }
+  .pin-btn:hover { color: var(--text); background: rgba(255, 255, 255, 0.07); }
+  .pin-btn.on {
+    color: var(--accent);
+    background: rgba(77, 163, 255, 0.14);
+    border-color: rgba(77, 163, 255, 0.45);
+  }
+  .pin-btn:disabled { opacity: 0.5; cursor: default; }
+
   .segment {
     font-size: 20px;
     font-weight: 700;
@@ -261,6 +283,7 @@
     .bottomrow { min-height: 16px; gap: 6px; }
     .status { font-size: 10px; min-height: 12px; }
     .mode { display: none; }
+    .pin-btn { width: 18px; height: 18px; }
     .clear-btn { padding: 3px 8px; font-size: 10px; border-radius: 5px; }
   }
 
@@ -270,6 +293,11 @@
   <div class="header">
     <span class="dot" id="dot"></span>
     <span class="title" id="title">课程强度同步</span>
+    <button class="pin-btn" id="pinBtn" type="button" title="始终置顶">
+      <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor" aria-hidden="true">
+        <path d="M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z"/>
+      </svg>
+    </button>
   </div>
 
   <div class="segment empty" id="segment">— 等待同步 —</div>
@@ -331,6 +359,7 @@ let el = {
   mainLegendLabel: document.getElementById("mainLegendLabel"),
   subLegendLabel: document.getElementById("subLegendLabel"),
   clearBtn: document.getElementById("clearBtn"),
+  pinBtn: document.getElementById("pinBtn"),
 };
 
 // 数值格式化：整数显示整数，小数保留 1 位
@@ -541,6 +570,10 @@ const FETCH_TIMEOUT_MS = 3000;
 // 避免 fusionscript 短暂卡顿导致的"无法连接"提示闪烁
 let failStreak = 0;
 
+// 是否已经显示过课程数据。用来看"这次没拿到数据"到底是「刚启动还没连上」
+// 还是「本来好好的、只是临时卡了一下」——后者保留旧画面，不要闪。
+let hasData = false;
+
 async function poll() {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
@@ -553,6 +586,7 @@ async function poll() {
     el.dot.className = "dot" + (s.connected ? " on" : "");
 
     if (s.course_loaded) {
+      hasData = true;
       el.title.textContent = (s.title || s.course_name) + " · " + s.timeline_name;
       el.segment.textContent = s.segment || "—";
       el.segment.className = "segment" + (s.segment ? "" : " empty");
@@ -595,9 +629,18 @@ async function poll() {
       el.status.textContent = "已同步 · " + formatTime(s.time_seconds);
       el.mode.textContent = modeIcon + " " + mode;
       el.mode.style.color = modeColor;
+    } else if (hasData) {
+      // 之前已经显示过课程数据，只是这一次没拿到 —— 典型场景：拖动时间线时
+      // 达芬奇的 API 会卡住一两秒，或者短暂读不到时间线名。
+      // 这种情况**保留上一次的画面**（环节、指标、曲线全都留着），只更新指示灯
+      // 和底部那行小字；数据一回来立刻刷新。
+      // 反过来（每次没拿到就整块刷成「等待达芬奇…」）会让拖时间线时满屏闪烁，
+      // 什么也看不清。
+      el.status.textContent = s.message || "同步中…";
+      el.mode.textContent = "";
     } else {
       el.title.textContent = "课程强度同步";
-      // connected=false 表示还在等达芬奇（可能插件先开、达芬奇后开），
+      // 从没显示过数据：可能插件比达芬奇先开，也可能达芬奇没连上。
       // 给个明确文案，而不是让人以为「没数据」。
       const waiting = !s.connected;
       el.segment.textContent = waiting ? "等待达芬奇…" : "— 等待同步 —";
@@ -611,6 +654,12 @@ async function poll() {
       drawCurve({ kind: "metric", times: [], main: [], sub: [], main_label: "", sub_label: "" }, null);
       el.status.textContent = s.message || "未同步";
       el.mode.textContent = "";
+    }
+
+    // ---- 左上角图钉：跟后端对齐置顶状态 ----
+    if (typeof s.pin === "boolean" && !pinBusy && s.pin !== pinned) {
+      pinned = s.pin;
+      renderPinButton();
     }
 
     // ---- 右下角按钮状态同步（课件数 / 是否正在转换）----
@@ -761,6 +810,51 @@ function onActionClick() {
 
 el.clearBtn.addEventListener("click", onActionClick);
 renderActionButton();
+
+// ------------------------------------------------------------------
+// 左上角图钉：切换「始终置顶」
+//   亮 = 悬浮窗一直压在达芬奇上面（等同 PowerToys 的 Always On Top）
+//   灭 = 普通窗口，会被别的窗口盖住、也能正常最小化
+// 选择会记在后端（.runtime/topmost.json），下次打开沿用 —— 不想被强制置顶
+// 的话关一次就够了，不用每次开插件都关。
+// ------------------------------------------------------------------
+
+let pinned = false;       // 当前是否置顶（后端 /state 的 pin 字段为准）
+let pinBusy = false;      // 正在切换，避免连点
+
+function renderPinButton() {
+  const btn = el.pinBtn;
+  btn.className = "pin-btn" + (pinned ? " on" : "");
+  btn.title = pinned
+    ? "已置顶：悬浮窗会一直压在最上面（点击取消，之后可正常最小化）"
+    : "点击让悬浮窗始终置顶";
+}
+
+async function togglePin() {
+  if (pinBusy) return;
+  pinBusy = true;
+  const want = !pinned;
+  pinned = want;                    // 先乐观更新，点下去就有反馈
+  renderPinButton();
+  try {
+    const r = await fetch(BASE + "/pin?on=" + (want ? "1" : "0"), { method: "POST" });
+    const res = await r.json();
+    if (typeof res.on === "boolean") {
+      pinned = res.on;
+      renderPinButton();
+    }
+    setNotice(want ? "已置顶：悬浮窗会一直在最上面" : "已取消置顶：可以正常最小化", 3000);
+  } catch (e) {
+    pinned = !want;                 // 失败就回滚，别让按钮跟实际状态不一致
+    renderPinButton();
+    setNotice("切换置顶失败：无法连接服务", 4000);
+  } finally {
+    pinBusy = false;
+  }
+}
+
+el.pinBtn.addEventListener("click", togglePin);
+renderPinButton();
 
 // 关窗时通知后端退出：后端在后台默默跑着（没有窗口），如果这里不发信号，
 // 用户关掉悬浮窗后它就变成看不见的僵尸进程，下次启动还占着 8765 端口。

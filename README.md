@@ -32,7 +32,7 @@ overlay.html  ── dark overlay window, real-time rendering
 | `resolve_connection.py` | Wrapper around the DaVinci Resolve Scripting API |
 | `course_data.py` | Course data loading + stepped (time-based) queries |
 | `equipment_config.py` | Equipment field configuration (treadmill / bike / rower / elliptical / bodyweight) |
-| `overlay.html` / `overlay.py` | Dark overlay window + Edge app-mode launcher (auto always-on-top, auto size fix) |
+| `overlay.html` / `overlay.py` | Dark overlay window + Edge app-mode launcher (pin-button topmost, auto size fix) |
 | `xlsx_to_json.py` | **Converts course `.xlsx` files into plugin JSON** (command-line entry) |
 | `convert_course.py` / `convert.bat` | Graphical conversion: file-picker dialog → JSON |
 | `launcher.py` | What `start.bat` actually runs: hidden backend + overlay + topmost keep-alive + auto-shutdown |
@@ -105,7 +105,13 @@ python overlay.py    # start overlay
 - In Resolve, open a timeline named the same as the course, scrub the playhead, and the overlay shows the current intensity in real time.
 - The overlay opens in Edge's `--app` mode (frameless small window) by default.
 - The overlay is **always-on-top by default** (same effect as PowerToys Always On Top) — no
-  `Win+Ctrl+T` needed; turn it off with `always_on_top: false`.
+  `Win+Ctrl+T` needed.
+- The **pin button in the top-left corner** toggles it: lit (blue) = stays above everything;
+  dim (grey) = an ordinary window that can be minimised or covered normally. The choice is
+  remembered in `.runtime/topmost.json`; `always_on_top` in `config.json` is only the default
+  for the very first launch.
+- The window size is corrected once when it opens and never forced again afterwards, so
+  resizing it by hand sticks.
 
 ## Deploying to Another Machine
 
@@ -128,7 +134,7 @@ This project is **portable** — no hard-coded user paths. Copy the whole folder
 | `overlay_idle_timeout` | Fallback: seconds without any frontend request before assuming the overlay is gone (covers browser crashes) | `90` |
 | `overlay_window_ratio` | Initial overlay size = screen work area × this ratio (`[width, height]`, about 1/7 of screen width) | `[0.135, 0.22]` |
 | `overlay_window_size` | Explicit initial overlay size in pixels (`[width, height]`; takes priority over the ratio) | `null` |
-| `always_on_top` | Keep the overlay always on top (built in — no PowerToys needed) | `true` |
+| `always_on_top` | Keep the overlay always on top **on first launch** (afterwards the pin button decides, and the choice is remembered) | `true` |
 
 > The port can also be overridden with the `RESOLVE_SYNC_PORT` environment variable (useful for a second instance or automated tests).
 
@@ -187,7 +193,11 @@ If auto-detection fails, set `resolve_script_path` to this path.
 - **Overlay shows "cannot connect to service"**: run `server.py` first.
 - **Status stuck on "connecting to Resolve"**: make sure Resolve is running and external scripting is set to Local.
 - **Cannot find a matching course**: check that `course_name` matches the timeline name (or contains it).
-- **Window won't stay on top**: Edge `--app` mode doesn't guarantee top-most; use PowerToys' Always On Top shortcut.
+- **Don't want it on top**: click the pin button in the top-left corner (the choice is remembered;
+  delete `.runtime/topmost.json` to fall back to `always_on_top`).
+- **The panel freezes for a second while scrubbing the timeline**: expected. DaVinci does not
+  report the playhead during a drag, so the last frame is kept on screen instead of flashing
+  back to the waiting state; it refreshes as soon as you let go.
 - **Bodyweight courses not converted**: bodyweight training counts "reps", has no equipment metrics, and its timeline is incomplete, so it isn't auto-converted yet and needs a separate design.
 
 ## Versioning

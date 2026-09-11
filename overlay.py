@@ -3,8 +3,8 @@
 悬浮窗启动器（Windows）。
 
 用 Edge 的 --app 模式打开 overlay.html，得到一个无地址栏的独立小窗。
-窗口初始尺寸按屏幕工作区的比例算（见下方 WINDOW_SIZE_RATIO），并用置顶工具
-（见下方说明）保持最前。
+窗口初始尺寸按屏幕工作区的比例算（见下方 WINDOW_SIZE_RATIO），并可选「始终置顶」
+（见下方说明；对应前端左上角的图钉按钮）。
 
 注意：Edge 对 --app 窗口会恢复「上次记住的尺寸」，经常完全无视 --window-size，
 所以开窗后还会用 Win32 SetWindowPos 再强制一次（见 _enforce_window_size）。
@@ -159,14 +159,50 @@ def compute_window_size():
 
 
 def always_on_top_enabled():
-    """是否启用「始终置顶」（config.json 的 always_on_top，默认开）。
+    """config.json 里 always_on_top 的**初始**值（默认开）。
 
     写错类型/读不到配置都按默认走，不让用户因为一个配置项打不开窗口。
+    注意这只是「默认」；用户在前端点图钉后的选择会记到 .runtime/topmost.json，
+    优先级更高（见 read_topmost_pref）。
     """
     val = _read_config().get("always_on_top", ALWAYS_ON_TOP)
     if isinstance(val, str):
         return val.strip().lower() not in ("0", "false", "no", "off")
     return bool(val)
+
+
+# 用户在前端点图钉产生的「是否置顶」偏好。放 .runtime/（已 gitignore）：
+# 只影响这台机器上的观感，不属于要提交的项目内容。
+PREF_FILE = os.path.join(BASE_DIR, ".runtime", "topmost.json")
+
+
+def read_topmost_pref():
+    """悬浮窗要不要置顶：优先用用户上次点图钉的选择，没有就按 config.json 默认。
+
+    这样「取消置顶」是一次性的选择 —— 用户不想让它压在达芬奇上面，关掉一次，
+    下次打开就不会又被强制置顶。
+    """
+    try:
+        with open(PREF_FILE, "r", encoding="utf-8") as f:
+            v = json.load(f)
+        if isinstance(v, dict) and isinstance(v.get("on"), bool):
+            return v["on"]
+    except Exception:
+        pass
+    return always_on_top_enabled()
+
+
+def write_topmost_pref(on):
+    """记下用户的置顶选择（best-effort：写不了也不影响本次生效）。"""
+    try:
+        os.makedirs(os.path.dirname(PREF_FILE), exist_ok=True)
+        tmp = PREF_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"on": bool(on)}, f)
+        os.replace(tmp, PREF_FILE)
+        return True
+    except Exception:
+        return False
 
 
 def launch_overlay(detached=True):
@@ -178,7 +214,7 @@ def launch_overlay(detached=True):
     edge = find_edge()
     url = overlay_url()
     size = compute_window_size()
-    topmost = always_on_top_enabled()
+    topmost = read_topmost_pref()   # 用户上次点图钉的选择优先于 config 默认值
 
     if edge:
         cmd = [
@@ -207,28 +243,20 @@ def launch_overlay(detached=True):
         return False, False
 
 
-def keep_on_top(size=None, topmost=None):
-    """复查并恢复悬浮窗的「置顶 + 尺寸」，返回是否找到了窗口。
+def apply_topmost(on):
+    """把悬浮窗设为 / 取消「始终置顶」，返回是否找到了窗口。
 
-    给 launcher 周期性调用（每秒一次即可）：置顶状态可能被别的程序/系统操作顶掉，
-    尺寸也可能被 Edge 自己套回记忆值，这里发现不对就立刻纠正。
-
-    只在「确实不对」时才调用 Win32，避免每秒都去动窗口（无谓的抖动）。
+    给 launcher 周期性调用（每秒一次）：只纠正置顶状态，**不碰尺寸和位置** ——
+    用户手动把窗口拉大了、或者最小化了，都不该被我们拽回来。
+    已经是目标状态就什么都不做（避免每秒无谓地去动窗口）。
     """
-    if topmost is None:
-        topmost = always_on_top_enabled()
     hwnd = _find_overlay_hwnd()
     if not hwnd:
         return False
-
-    if size:
-        rect = _window_rect(hwnd)
-        if not rect or rect[2] != int(size[0]) or rect[3] != int(size[1]):
-            _apply_window_size(hwnd, int(size[0]), int(size[1]))
-
-    if topmost and not _is_topmost(hwnd):
+    if on and not _is_topmost(hwnd):
         _set_topmost(hwnd, True)
-
+    elif (not on) and _is_topmost(hwnd):
+        _set_topmost(hwnd, False)
     return True
 
 
@@ -266,6 +294,8 @@ def _win32():
         u32.SetWindowPos.restype = wintypes.BOOL
         u32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
         u32.ShowWindow.restype = wintypes.BOOL
+        u32.IsIconic.argtypes = [wintypes.HWND]
+        u32.IsIconic.restype = wintypes.BOOL
         u32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
         u32.GetWindowLongW.restype = ctypes.c_long
         k32.GetConsoleWindow.restype = wintypes.HWND
@@ -330,6 +360,11 @@ def _apply_window_size(hwnd, w, h):
     if not u32:
         return False
     try:
+        if u32.IsIconic(hwnd):
+            # 窗口最小化了：不要动它（ShowWindow(SW_RESTORE) 会把它弹回来，
+            # 用户会以为"最小化不管用"）。
+            return True
+
         u32.ShowWindow(hwnd, 9)  # SW_RESTORE：万一被记忆成最大化，先还原
 
         rect = _window_rect(hwnd)
@@ -435,9 +470,8 @@ def launch():
         return
     if app_mode:
         print("已启动悬浮窗（Edge app 模式）。")
-        if always_on_top_enabled():
-            print("已自动置顶（无需再按 Win+Ctrl+T；可在 config.json 里用"
-                  " always_on_top=false 关掉）。")
+        if read_topmost_pref():
+            print("已置顶；点悬浮窗左上角的图钉按钮可取消（取消后下次打开也不再置顶）。")
     else:
         print("未找到 Edge，已用默认浏览器打开（非置顶窗口）。")
 

@@ -7,7 +7,7 @@ launcher.py —— 一键启动（start.bat 调用的就是它）。
 背后做四件事：
     1. 以「后台无窗口」方式启动 server.py（不再弹命令行黑框）；
     2. 轮询后端 /ping，等它真正就绪再开窗（避免悬浮窗先开、一直显示连不上）；
-    3. 用 Edge 的 --app 模式打开悬浮窗（自带「始终置顶」，无需手动 Win+Ctrl+T）；
+    3. 用 Edge 的 --app 模式打开悬浮窗（默认置顶，前端左上角图钉按钮可随时开关）；
     4. 盯着悬浮窗：一旦窗口消失，就结束后端进程，然后自己退出。
 
 后端自己也有一套「前端失联就退出」的兜底（见 server.py 的 Liveness），
@@ -185,6 +185,20 @@ def wait_server_ready(proc, port, timeout=25.0):
     return False
 
 
+def fetch_pin(port, timeout=0.8):
+    """问后端「现在该不该置顶」（前端图钉按钮的状态）。
+
+    返回 True / False；问不到（后端没了）返回 None —— 调用方沿用上一次的值，
+    不要因为一次网络抖动就把窗口的置顶状态改掉。
+    """
+    url = f"http://127.0.0.1:{port}/pin"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            return bool(json.loads(r.read().decode("utf-8")).get("on"))
+    except Exception:
+        return None
+
+
 def stop_server(proc):
     """结束后端进程（先礼后兵）。"""
     if proc is None or proc.poll() is not None:
@@ -304,8 +318,7 @@ def main(argv=None):
     state = "wait_appear"
     appear_deadline = time.time() + 40
     misses = 0
-    win_size = overlay.compute_window_size()
-    topmost = overlay.always_on_top_enabled()
+    pin = overlay.read_topmost_pref()   # 期望的置顶状态，之后每秒跟后端对齐
     last_keep = 0.0
 
     while True:
@@ -325,11 +338,17 @@ def main(argv=None):
         elif state == "monitor":
             if overlay_window_exists():
                 misses = 0
-                # 周期性复查「置顶 + 尺寸」：置顶状态可能被别的程序顶掉，
-                # 尺寸也可能被 Edge 自己套回记忆值。真不对时才动窗口。
+                # 每秒跟后端的图钉状态对齐一次：用户点了图钉（开/关置顶）后，
+                # 这里负责把窗口真正调成那个状态 —— 即使置顶被别的程序顶掉，
+                # 只要图钉还亮着，1 秒内就会自动恢复。
+                # 注意：只动置顶，**不碰尺寸/位置**，用户手动拉大窗口或最小化
+                # 都不会被我们拽回去。
                 if time.time() - last_keep >= 1.0:
                     last_keep = time.time()
-                    overlay.keep_on_top(size=win_size, topmost=topmost)
+                    now = fetch_pin(port)
+                    if now is not None:
+                        pin = now
+                    overlay.apply_topmost(pin)
             else:
                 misses += 1
                 if misses >= 3:      # 连续 3 秒找不到，认定用户关掉了

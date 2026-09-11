@@ -30,6 +30,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from course_data import CourseData, load_course, list_course_files
 from resolve_connection import ResolveConnection, timecode_to_seconds
 from equipment_config import EQUIPMENTS
+import overlay   # 借用它的「置顶」实现（同一目录，纯 Win32 小工具）
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -226,6 +227,47 @@ class State:
 
 
 STATE = State()
+
+
+# ---------- 悬浮窗「始终置顶」开关（前端左上角图钉按钮） ----------
+
+class PinState:
+    """悬浮窗要不要一直压在达芬奇上面。
+
+    以前是启动时写死的（config.json 的 always_on_top），用户没得选，只能被动接受；
+    现在前端左上角有个图钉按钮：点亮 = 置顶，熄灭 = 普通窗口（可以正常最小化、
+    也会被别的窗口盖住）。
+
+    三件事：
+        1. 立即生效 —— set() 里直接调 Win32 改 Z 序，不用等 launcher 下一秒复查；
+        2. 记住选择 —— 落盘到 .runtime/topmost.json，下次打开沿用；
+        3. 对外可见 —— /state 里带 pin 字段，前端据此渲染图钉的亮/灭。
+    """
+
+    def __init__(self, on):
+        self._lock = threading.Lock()
+        self._on = bool(on)
+
+    def get(self):
+        with self._lock:
+            return self._on
+
+    def set(self, on):
+        on = bool(on)
+        with self._lock:
+            if self._on == on:
+                return on          # 状态没变就别去动窗口
+            self._on = on
+        overlay.write_topmost_pref(on)
+        try:
+            overlay.apply_topmost(on)   # 立刻生效（找不到窗口就算了，launcher 会兜底）
+        except Exception:
+            pass
+        print(f"[置顶] {'开启' if on else '关闭'}悬浮窗始终置顶", flush=True)
+        return on
+
+
+PIN = PinState(overlay.read_topmost_pref())
 
 
 # ---------- 课程数据管理 ----------
@@ -987,12 +1029,19 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"ok": True})
             return
 
+        if self.path == "/pin":
+            # launcher 每秒来问一次「现在该不该置顶」。和 /ping 一样**不算心跳**，
+            # 否则后端永远不会因为前端关窗而空闲退出。
+            self._send_json({"on": PIN.get()})
+            return
+
         s = STATE.snapshot()
         if self.path in ("/", "/state"):
             LIVENESS.beat()   # 前端在拉数据 = 前端还活着
             # 悬浮窗右下角按钮的状态：课件数 > 0 显示「清除课件缓存」，
             # == 0 显示「选择课件」；转换进行中则临时显示「等待选择…」。
             s["course_count"] = COURSES.count()
+            s["pin"] = PIN.get()   # 左上角图钉按钮：当前是否置顶
             s.update(CONVERT.snapshot())
             self._send_json(s)
         else:
@@ -1038,6 +1087,17 @@ class Handler(BaseHTTPRequestHandler):
                     "started": False,
                     "message": "上一次转换还没结束，请先在弹窗里选择文件",
                 })
+        elif self.path.startswith("/pin"):
+            # 前端图钉按钮：POST /pin?on=1 / ?on=0
+            q = ""
+            if "?" in self.path:
+                q = self.path.split("?", 1)[1]
+            on = True
+            for kv in q.split("&"):
+                if kv.startswith("on="):
+                    on = kv[3:].strip().lower() not in ("0", "false", "no", "off", "")
+            applied = PIN.set(on)
+            self._send_json({"ok": True, "on": applied})
         elif self.path == "/shutdown":
             # 前端关窗（pagehide）时用 sendBeacon 打过来 → 后端自行退出
             self._send_json({"ok": True})

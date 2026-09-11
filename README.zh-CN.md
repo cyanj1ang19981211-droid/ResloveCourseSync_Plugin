@@ -28,14 +28,14 @@ overlay.html  ── 暗色悬浮窗，实时渲染
 
 | 文件 | 作用 |
 |---|---|
-| `server.py` | 后端：连达芬奇 + 轮询时间码 + 匹配课程 + 本地 HTTP（含清缓存/选课件端点） |
+| `server.py` | 后端：连达芬奇 + 轮询时间码 + 匹配课程 + 本地 HTTP（含清缓存/选课件/图钉端点） |
 | `resolve_connection.py` | 封装达芬奇 Scripting API |
 | `course_data.py` | 课程数据加载 + 按时间阶梯查询 |
 | `equipment_config.py` | 器械字段配置（跑步机/单车/划船机/椭圆机/徒手） |
-| `overlay.html` / `overlay.py` | 暗色悬浮窗 + Edge app 启动器（自动置顶 / 自动纠正尺寸） |
+| `overlay.html` / `overlay.py` | 暗色悬浮窗 + Edge app 启动器（图钉置顶 / 自动纠正尺寸） |
 | `xlsx_to_json.py` | **把课件 xlsx 转成插件 JSON**（命令行入口） |
 | `convert_course.py` / `convert.bat` | 图形化转换：弹文件选择框 → 生成 JSON |
-| `launcher.py` | `start.bat` 背后真正干活的：后台起后端 + 开悬浮窗 + 持续保置顶 + 关窗收尾 |
+| `launcher.py` | `start.bat` 背后真正干活的：后台起后端 + 开悬浮窗 + 跟随图钉保置顶 + 关窗收尾 |
 | `start.bat` | 一键启动（无黑框；关掉悬浮窗即全部退出） |
 | `config.json` | 配置（端口、数据目录、达芬奇脚本路径） |
 | `data/` | 课程 JSON 数据（私密业务数据，不纳入版本管理） |
@@ -103,9 +103,13 @@ python overlay.py    # 启动悬浮窗
 
 - 在达芬奇里打开与课程同名的时间线，拖动播放头，悬浮窗即实时显示当前强度。
 - 悬浮窗默认用 Edge 的 `--app` 模式打开（无边框小窗），并**自动「始终置顶」**——效果等同
-  PowerToys 的 Always On Top，不用再手动按 `Win+Ctrl+T`（可用 `always_on_top: false` 关掉）。
-- 置顶与尺寸由 `overlay.py` 用 Win32 `SetWindowPos` 设置，`launcher.py` 每秒复查一次：
-  万一被别的程序顶掉或尺寸被 Edge 打回，1 秒内自动恢复。
+  PowerToys 的 Always On Top，不用再手动按 `Win+Ctrl+T`。
+- **左上角图钉按钮**随时切换置顶：亮（蓝）= 一直压在最上面；灭（灰）= 普通窗口，
+  可正常最小化、可被别的窗口盖住。选择记在 `.runtime/topmost.json`，下次启动沿用；
+  `config.json` 的 `always_on_top` 只作为第一次启动的默认值。
+- 置顶由 `overlay.py` 用 Win32 `SetWindowPos`（`WS_EX_TOPMOST`）设置，点击即时生效；
+  `launcher.py` 每秒跟后端对一次状态，被别的程序顶掉也会自动恢复。
+  尺寸只在开窗时校正一次，之后不再周期性强改 —— 手动拉大窗口不会被拽回去。
 
 ## 配置（config.json）
 
@@ -119,7 +123,7 @@ python overlay.py    # 启动悬浮窗
 | `overlay_idle_timeout` | 兜底：前端多少秒无请求就认定已关闭（应对浏览器崩溃） | `90` |
 | `overlay_window_ratio` | 悬浮窗初始尺寸 = 屏幕工作区 × 该比例（`[宽, 高]`，约屏宽 1/7、屏高 1/5） | `[0.135, 0.22]` |
 | `overlay_window_size` | 直接指定悬浮窗初始尺寸（像素，`[宽, 高]`；优先级高于上面的比例） | `null` |
-| `always_on_top` | 悬浮窗是否「始终置顶」（自带置顶，无需 PowerToys） | `true` |
+| `always_on_top` | **首次启动**是否「始终置顶」（之后由左上角图钉决定，选择会被记住） | `true` |
 
 > 端口也可以用环境变量 `RESOLVE_SYNC_PORT` 临时覆盖（跑第二个实例或自动化测试时有用）。
 
@@ -182,7 +186,10 @@ C:\ProgramData\Blackmagic Design\DaVinci Resolve\Support\Developer\Scripting\Mod
 - **悬浮窗显示「无法连接服务」**：先运行 `server.py`。
 - **状态一直「正在连接达芬奇」**：确认达芬奇已启动、外部脚本已开启为 Local。
 - **找不到同名课程**：检查 `course_name` 与时间线名称是否一致（或互为包含）。
-- **不想置顶**：`config.json` 里 `"always_on_top": false`。
+- **不想置顶**：点悬浮窗左上角的图钉按钮即可（会被记住）；要恢复「一开始就置顶」，
+  把 `config.json` 的 `"always_on_top"` 改回 `true`（或删掉 `.runtime/topmost.json`）。
+- **拖动时间线时画面「停住」一两秒**：正常。拖拽时达芬奇不会及时吐播放头位置，
+  插件会保留上一帧画面（不再闪成「等待达芬奇…」），松手后立刻刷新。
 - **按钮一直是「等待选择…」**：文件选择框已经弹出来了但可能被挡在后面，切到桌面找一下；
   选完或取消后按钮会自己恢复。
 - **徒手类课件未转换**：徒手训练按「个数」计数、无器械指标且时间轴不完整，暂不支持自动转换，需另行设计。
