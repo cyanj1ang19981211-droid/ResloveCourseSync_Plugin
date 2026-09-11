@@ -181,6 +181,32 @@ class ResolveConnection:
     def is_connected(self):
         return self.resolve is not None
 
+    def disconnect(self):
+        """主动断开：丢掉可能已失效的 app 句柄。
+
+        达芬奇被关闭后，self.resolve 指向的对象已经无效，但 API 不一定立刻报错
+        （可能只是持续返回空值）。这里显式清空，让下一次 connect() 重新
+        scriptapp("Resolve") 建立连接。
+        """
+        self.resolve = None
+
+    def is_alive(self) -> bool:
+        """轻量探活：达芬奇进程还在吗？
+
+        与「有没有时间线」无关——只判断连接本身是否还有效：
+            - 达芬奇还开着（哪怕没打开工程）→ GetProjectManager() 返回非 None
+            - 达芬奇已关闭 / 句柄失效        → 抛异常或返回 None
+
+        用 GetProjectManager() 当探针是因为它不依赖任何工程/时间线状态，
+        开销也足够小，可以每 2 秒调一次。
+        """
+        if not self.resolve:
+            return False
+        try:
+            return self.resolve.GetProjectManager() is not None
+        except Exception:
+            return False
+
     # ---------- 内部：正确的对象层级 ProjectManager -> Project -> Timeline ----------
 
     def _get_timeline(self):

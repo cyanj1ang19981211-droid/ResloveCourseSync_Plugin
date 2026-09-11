@@ -5,5 +5,7 @@
   "port": 8765,
   "poll_interval": 0.1,
   "auto_exit_on_overlay_close": true,
-  "overlay_idle_timeout": 90
+  "overlay_idle_timeout": 90,
+  "overlay_window_ratio": [0.135, 0.22],
+  "overlay_window_size": null
 }

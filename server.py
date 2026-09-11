@@ -63,6 +63,10 @@ def load_config():
         # 收不到关闭信号的极端情况）。取 90s 是因为浏览器对最小化/后台的页面会把
         # 定时器降频到每分钟一次，超时太短会误杀。
         "overlay_idle_timeout": 90,
+        # 悬浮窗初始尺寸：按屏幕工作区比例算（宽, 高）。默认接近屏宽 1/7、屏高 1/5，
+        # 可在小屏上不至于占掉半个屏幕。也可以在 overlay_window_size 里直接写像素。
+        "overlay_window_ratio": [0.135, 0.22],
+        "overlay_window_size": None,
     }
     if os.path.exists(cfg_path):
         with open(cfg_path, "r", encoding="utf-8") as f:
@@ -534,6 +538,11 @@ def _resolve_worker(q, module_path, lib_path):
     _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
     from resolve_connection import ResolveConnection as _RC
 
+    # 未连接时：多久重试一次连接（达芬奇可能在插件之后才启动）
+    RECONNECT_INTERVAL = 3.0
+    # 已连接时：多久探活一次（达芬奇被关掉后要及时发现）
+    ALIVE_PROBE_INTERVAL = 2.0
+
     def _tc_to_sec(s, fps):
         if not s: return None
         p = s.split(":")
@@ -554,11 +563,29 @@ def _resolve_worker(q, module_path, lib_path):
 
     conn = _RC(module_path, lib_path)
     print(f"[worker] 启动 | module={conn.module_path} | lib={conn.lib_path}", flush=True)
-    ok = conn.connect()
-    if ok:
-        q.put(("init", True, ""))
+
+    def _wait_msg(err: str) -> str:
+        """把连接失败原因转成前端状态栏能显示的一句人话。"""
+        err = (err or "").strip()
+        if (not err) or ("返回 None" in err):
+            # scriptapp("Resolve") 返回 None：最常见就是「达芬奇还没启动」
+            return "正在等待达芬奇启动…（启动后插件会自动连接，无需重启插件）"
+        first = err.splitlines()[0][:160]
+        return f"正在等待达芬奇：{first}"
+
+    connected = False
+    try:
+        connected = conn.connect()
+    except Exception as e:
+        conn.last_error = f"{type(e).__name__}: {e}"
+        connected = False
+
+    q.put(("init", connected, "" if connected else _wait_msg(conn.last_error)))
+    if connected:
+        print("[worker] 已连接到达芬奇", flush=True)
     else:
-        q.put(("init", False, conn.last_error or "未知原因"))
+        print(f"[worker] 暂未连接到达芬奇（将每 {RECONNECT_INTERVAL:.0f}s 重试）："
+              f"{conn.last_error}", flush=True)
 
     # ---- 完全透传 raw（最简方案） ----
     # 达芬奇 GetCurrentTimecode() 的真实表现：
@@ -573,11 +600,45 @@ def _resolve_worker(q, module_path, lib_path):
     #     无法从外部绕过，只能让用户接受。
     #   - 如果未来达芬奇修复此问题或使用其他 API（如 GetCurrentVideoItem 的实时偏移），
     #     再考虑做平滑。当前最优解就是信任源。
+    last_retry = _time.time()      # 上次尝试重连的时间
+    last_probe = _time.time()      # 上次探活的时间
     last_print = 0.0
     fps = 50.0
 
     while True:
         try:
+            # ============ 未连接：按节奏重试 ============
+            # 关键修复：用户完全可能「先开插件，再开达芬奇」。以前连不上就永远
+            # 连不上了（只 connect 一次），悬浮窗会一直显示没有时间线数据。
+            if not connected:
+                if _time.time() - last_retry >= RECONNECT_INTERVAL:
+                    last_retry = _time.time()
+                    try:
+                        if conn.connect():
+                            connected = True
+                            last_probe = _time.time()
+                            q.put(("init", True, ""))
+                            print("[worker] 已连接到达芬奇（重试成功）", flush=True)
+                        else:
+                            q.put(("init", False, _wait_msg(conn.last_error)))
+                    except Exception as e:
+                        q.put(("init", False, _wait_msg(f"{type(e).__name__}: {e}")))
+                _time.sleep(0.5)
+                continue
+
+            # ============ 已连接：定时探活 ============
+            # 达芬奇被关掉后，API 往往只是「持续返回空值」而不是抛异常，
+            # 所以主动每 2 秒问一句「你还在吗」，掉线就回到重连分支。
+            if _time.time() - last_probe >= ALIVE_PROBE_INTERVAL:
+                last_probe = _time.time()
+                if not conn.is_alive():
+                    connected = False
+                    conn.disconnect()
+                    q.put(("init", False, "达芬奇已关闭，正在等待它重新启动…"))
+                    print("[worker] 与达芬奇的连接已断开，回到等待重连状态", flush=True)
+                    _time.sleep(0.3)
+                    continue
+
             t0 = _time.time()
             tl = conn.current_timeline_name()
             tc_raw = conn.current_timecode()
@@ -604,59 +665,127 @@ def _resolve_worker(q, module_path, lib_path):
             _time.sleep(1.0)
 
 
+def _spawn_worker(module_path, lib_path):
+    """起一个新的达芬奇 worker 子进程，返回 (queue, process)。"""
+    q = mp.Queue()  # 不限大小，避免 worker put 阻塞
+    p = mp.Process(target=_resolve_worker, args=(q, module_path, lib_path), daemon=True)
+    p.start()
+    return q, p
+
+
 def resolve_loop():
     """主进程后台线程：从 worker 子进程的队列里读数据，更新 STATE。
 
     GIL 永远不阻塞这里（我们不调用 fusionscript），HTTP 永远能响应。
+
+    另外负责「看住」worker：
+        - worker 因为达芬奇关闭时 fusionscript 原生崩溃而退出 → 自动重启；
+        - worker 卡死在原生调用里（一直不给消息）→ 杀掉重启。
+      重启后 worker 会自己重新连接达芬奇，用户不需要做任何事。
     """
-    # 启动 worker 子进程
     module_path = CONFIG.get("resolve_script_path")
     lib_path = CONFIG.get("resolve_script_lib")
-    _q = mp.Queue()  # 不限大小，避免 worker put 阻塞
-    _proc = mp.Process(target=_resolve_worker, args=(_q, module_path, lib_path), daemon=True)
-    _proc.start()
-    print(f"[主进程] 启动 worker 子进程 (pid={_proc.pid})")
+
+    HANG_TIMEOUT = 12.0   # worker 超过这么久没任何消息 → 判定卡死，重启它
+
+    _q, _proc = _spawn_worker(module_path, lib_path)
+    print(f"[主进程] 启动 worker 子进程 (pid={_proc.pid})", flush=True)
+
+    # 连接状态去重：状态没变就不反复写 STATE，避免前端文字闪烁
+    conn_state = {"ok": None, "msg": None}
+
+    def _set_conn(ok: bool, msg: str):
+        if conn_state["ok"] == ok and conn_state["msg"] == msg:
+            return
+        conn_state["ok"] = ok
+        conn_state["msg"] = msg
+        if ok:
+            STATE.update(connected=True, message="")
+        else:
+            # 断开时把课程画面一并清掉：让悬浮窗显示「等待达芬奇」，
+            # 而不是停留在上一次的旧数据上（用户会以为还在同步）
+            STATE.update(
+                connected=False,
+                course_loaded=False,
+                timeline_name="",
+                course_name="",
+                title="",
+                segment="",
+                action="",
+                keyword="",
+                intensity="",
+                intensity_score=0.0,
+                values={},
+                segment_remaining=0.0,
+                next_step=None,
+                message=msg,
+            )
 
     # 等待 worker 的 init 结果
+    last_msg = time.time()
     try:
         kind, ok, msg = _q.get(timeout=15)
+        last_msg = time.time()
         if kind == "init" and ok:
-            print("[已连接] 成功连上达芬奇（worker 子进程）")
+            print("[已连接] 成功连上达芬奇（worker 子进程）", flush=True)
+            _set_conn(True, "")
         else:
-            print(f"[未连接] {msg[:200]}")
+            print(f"[未连接] {str(msg)[:200]}", flush=True)
+            _set_conn(False, str(msg or "正在等待达芬奇启动…"))
     except Exception as e:
-        print(f"[主进程] 等待 worker init 超时: {e}")
-        kind, ok, msg = ("init", False, "worker 启动超时")
-
-    STATE.update(connected=bool(ok), message=msg.splitlines()[0][:200] if msg else "")
+        print(f"[主进程] 等待 worker init 超时: {e}", flush=True)
+        _set_conn(False, "正在连接达芬奇…")
 
     # 主循环：从队列取最新 snapshot，更新 STATE
-    last_snapshot = ("", None, 25.0)  # (tl_name, tc, fps)
-    poll_interval = CONFIG.get("poll_interval", 0.1)
     dbg_last = 0.0
     while True:
         try:
-            item = _q.get(timeout=3)
+            item = _q.get(timeout=2)
+            last_msg = time.time()
         except Exception:
-            # worker 卡住或死了，标记同步中断（但不动 STATE 的 data，让画面保留）
-            STATE.update(connected=False, message="达芬奇通信超时")
-            time.sleep(0.5)
+            # 队列空：worker 要么挂了，要么卡在原生调用里
+            now = time.time()
+            dead = not _proc.is_alive()
+            if dead or (now - last_msg) > HANG_TIMEOUT:
+                why = "已退出" if dead else f"超过 {HANG_TIMEOUT:.0f} 秒无响应"
+                print(f"[主进程] worker 子进程{why}，正在重启…", flush=True)
+                try:
+                    _proc.kill()
+                except Exception:
+                    pass
+                try:
+                    _proc.join(timeout=2)
+                except Exception:
+                    pass
+                try:
+                    _q.close()
+                except Exception:
+                    pass
+                _q, _proc = _spawn_worker(module_path, lib_path)
+                last_msg = time.time()
+                print(f"[主进程] worker 已重启 (pid={_proc.pid})", flush=True)
+            _set_conn(False, "正在连接达芬奇…")
             continue
 
         if item[0] == "init":
-            # worker 重新连接成功（init 在 connect 重试时也会 put）
-            STATE.update(connected=bool(item[1]), message=item[2] if len(item) > 2 else "")
-            if item[1]:
-                print("[已连接] worker 重新连上达芬奇")
+            # worker 的（重）连接结果：连上/断开/仍在等待
+            ok = bool(item[1])
+            msg = item[2] if len(item) > 2 else ""
+            if ok:
+                print("[已连接] worker 连上达芬奇", flush=True)
+                _set_conn(True, "")
+            else:
+                _set_conn(False, msg or "正在等待达芬奇启动…")
             continue
         if item[0] == "error":
-            STATE.update(connected=False, message=f"worker 错误: {item[1]}")
+            _set_conn(False, f"worker 错误: {item[1]}")
             time.sleep(0.5)
             continue
         if item[0] != "snapshot":
             continue
 
         # 正常 snapshot（兼容旧版 4-tuple 和新版 5-tuple）
+        _set_conn(True, "")
         tl_name = item[1]
         tc = item[2]
         fps = item[3] if len(item) > 3 else 25.0
@@ -680,8 +809,9 @@ def resolve_loop():
                 values={},
                 segment_remaining=0.0,
                 next_step=None,
-                message=("未找到对应课程的强度数据" if tl_name else "当前无时间线")
-                       + "（按器械+课程名匹配；如确认有对应 JSON，请检查时间线名是否含器械前缀，如'椭圆机-XXX'、'跑步机-XXX'）",
+                message=("未找到对应课程的强度数据（按器械+课程名匹配；如确认有对应 JSON，"
+                         "请检查时间线名是否含器械前缀，如'椭圆机-XXX'、'跑步机-XXX'）"
+                         if tl_name else "已连接达芬奇，但当前没有打开的时间线"),
             )
         else:
             # 时间码 -> 秒

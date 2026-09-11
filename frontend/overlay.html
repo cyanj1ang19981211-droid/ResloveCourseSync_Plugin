@@ -27,13 +27,19 @@
     user-select: none;
     -webkit-user-select: none;
   }
-  body { padding: 12px; }
+  body {
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-height: 0;
+  }
 
   .header {
     display: flex;
     align-items: center;
     gap: 8px;
-    margin-bottom: 8px;
+    flex: 0 0 auto;
   }
   .dot {
     width: 8px; height: 8px; border-radius: 50%;
@@ -50,6 +56,8 @@
     color: var(--accent);
     min-height: 28px;
     line-height: 1.2;
+    flex: 0 0 auto;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   .segment.empty { color: var(--muted); }
 
@@ -60,7 +68,7 @@
     gap: 10px;
     font-size: 12px;
     min-height: 18px;
-    margin-bottom: 4px;
+    flex: 0 0 auto;
   }
   .remaining {
     color: var(--amber);
@@ -83,10 +91,10 @@
     font-size: 12px;
     color: var(--muted);
     min-height: 18px;
-    margin-bottom: 8px;
     display: flex;
     gap: 8px;
     align-items: center;
+    flex: 0 0 auto;
   }
   .keyword-tag {
     background: var(--amber);
@@ -119,8 +127,9 @@
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
-    margin-bottom: 10px;
+    flex: 0 0 auto;
   }
+  .metrics:empty { display: none; }
   .metric {
     flex: 1 1 auto;
     min-width: 90px;
@@ -142,11 +151,16 @@
   }
   .metric .unit { font-size: 11px; color: var(--muted); margin-left: 2px; }
 
+  /* 折线图区：占据剩余高度，窗口多大就画多大（不再写死 80px） */
   .curve-box {
     background: var(--panel);
     border: 1px solid var(--border);
     border-radius: 8px;
     padding: 8px;
+    flex: 1 1 auto;
+    min-height: 56px;
+    display: flex;
+    flex-direction: column;
   }
   .curve-box .caption {
     font-size: 10px;
@@ -154,34 +168,37 @@
     margin-bottom: 4px;
     display: flex;
     gap: 12px;
+    flex: 0 0 auto;
   }
   .legend { display: flex; align-items: center; gap: 4px; }
   .legend .swatch { width: 10px; height: 3px; border-radius: 2px; display: inline-block; }
-  canvas { width: 100%; height: 80px; display: block; }
-  .curve-box.tall canvas { height: 130px; }
+  .canvas-wrap { flex: 1 1 auto; position: relative; min-height: 0; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 
+  /* 底部一行：左侧状态 + 右侧「清除课件缓存」按钮（同一行，不会互相遮挡） */
+  .bottomrow {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
+    min-height: 22px;
+  }
+  .statuscol { flex: 1 1 auto; min-width: 0; }
   .status {
-    margin-top: 8px;
     font-size: 11px;
     color: var(--muted);
     min-height: 15px;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   .mode {
-    margin-top: 2px;
     font-size: 10px;
     color: var(--muted);
     min-height: 14px;
     font-family: "Consolas", monospace;
   }
 
-  .footer {
-    position: fixed;
-    right: 12px;
-    bottom: 12px;
-    z-index: 10;
-  }
   .clear-btn {
+    flex: 0 0 auto;
     background: transparent;
     color: var(--muted);
     border: 1px solid var(--border);
@@ -190,6 +207,7 @@
     font-size: 11px;
     cursor: pointer;
     font-family: inherit;
+    white-space: nowrap;
     transition: color .15s, border-color .15s, background .15s;
   }
   .clear-btn:hover {
@@ -201,6 +219,31 @@
     opacity: 0.5;
     cursor: not-allowed;
   }
+
+  /* ------------------------------------------------------------------
+     小窗口适配：默认初始尺寸约 260x230（1080p 下屏宽 13.5% × 屏高 22%），
+     内容区只有 ~260x196，所以整体收一档字号/间距，保证不溢出、不用滚动。
+     用户把窗口拉大后媒体查询失效，自动回到上面这套宽松样式。
+     ------------------------------------------------------------------ */
+  @media (max-height: 320px), (max-width: 340px) {
+    body { padding: 6px; gap: 4px; }
+    .header .title { font-size: 11px; }
+    .segment { font-size: 14px; min-height: 18px; letter-spacing: 0; }
+    .nextline, .subline { font-size: 11px; min-height: 14px; }
+    .keyword-tag, .intensity-tag { font-size: 10px; padding: 1px 6px; }
+    .metrics { gap: 5px; }
+    .metric { min-width: 58px; padding: 3px 6px; border-radius: 6px; }
+    .metric .label { font-size: 9px; margin-bottom: 0; }
+    .metric .value { font-size: 14px; }
+    .metric .unit { font-size: 9px; }
+    .curve-box { padding: 5px; min-height: 42px; border-radius: 6px; }
+    .curve-box .caption { font-size: 9px; margin-bottom: 2px; gap: 8px; }
+    .bottomrow { min-height: 16px; gap: 6px; }
+    .status { font-size: 10px; min-height: 12px; }
+    .mode { display: none; }
+    .clear-btn { padding: 3px 8px; font-size: 10px; border-radius: 5px; }
+  }
+
 </style>
 </head>
 <body>
@@ -229,18 +272,25 @@
       <span class="legend" id="mainLegend" style="display:none"><span class="swatch" style="background:var(--accent)"></span><span id="mainLegendLabel"></span></span>
       <span class="legend" id="subLegend" style="display:none"><span class="swatch" style="background:var(--amber)"></span><span id="subLegendLabel"></span></span>
     </div>
-    <canvas id="curve"></canvas>
+    <div class="canvas-wrap">
+      <canvas id="curve"></canvas>
+    </div>
   </div>
 
-  <div class="status" id="status">正在连接服务...</div>
-  <div class="mode" id="mode"></div>
-
-  <div class="footer">
+  <div class="bottomrow">
+    <div class="statuscol">
+      <div class="status" id="status">正在连接服务...</div>
+      <div class="mode" id="mode"></div>
+    </div>
     <button class="clear-btn" id="clearBtn" type="button">清除课件缓存</button>
   </div>
 
 <script>
-const API = "http://127.0.0.1:8765/state";
+// 后端端口：由 overlay.py 打开窗口时通过 ?port= 传入（页面是 file:// 打开的，
+// 读不到 config.json）。默认 8765，与 server.py / config.json 保持一致。
+const PORT = (new URLSearchParams(location.search).get("port") || "8765");
+const BASE = "http://127.0.0.1:" + PORT;
+const API = BASE + "/state";
 
 let el = {
   dot: document.getElementById("dot"),
@@ -292,7 +342,10 @@ function drawCurve(curve, timeNow) {
   const ctx = canvas.getContext("2d");
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.clientWidth, h = canvas.clientHeight;
+  // 窗口还没布局完（或极小）时 clientWidth/Height 可能是 0，直接跳过避免异常
+  if (w <= 1 || h <= 1) return;
   canvas.width = w * dpr; canvas.height = h * dpr;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.scale(dpr, dpr);
   ctx.clearRect(0, 0, w, h);
 
@@ -514,8 +567,6 @@ async function poll() {
         el.next.textContent = "";
       }
       renderMetrics(s.values, s.field_meta);
-      // 徒手课只有强度折线，没有数值卡片 → canvas 撑高更好看
-      el.curveBox.classList.toggle("tall", s.equipment === "bodyweight");
       drawCurve(s.curve, s.time_seconds);
       // 显示 worker 模式（直传/外推/封顶），便于诊断"播放不前进"是不是 worker 端卡住
       const mode = s.mode || "?";
@@ -526,8 +577,11 @@ async function poll() {
       el.mode.style.color = modeColor;
     } else {
       el.title.textContent = "课程强度同步";
-      el.segment.textContent = "— 等待同步 —";
-      el.segment.className = "segment empty";
+      // connected=false 表示还在等达芬奇（可能插件先开、达芬奇后开），
+      // 给个明确文案，而不是让人以为「没数据」。
+      const waiting = !s.connected;
+      el.segment.textContent = waiting ? "等待达芬奇…" : "— 等待同步 —";
+      el.segment.className = "segment" + (waiting ? "" : " empty");
       el.action.textContent = "";
       el.keyword.style.display = "none";
       el.intensity.style.display = "none";
@@ -568,7 +622,7 @@ async function clearCache() {
   el.status.textContent = "正在清除课件缓存…";
 
   try {
-    const r = await fetch("http://127.0.0.1:8765/clear_cache", { method: "POST" });
+    const r = await fetch(BASE + "/clear_cache", { method: "POST" });
     const res = await r.json();
     if (res.ok) {
       el.status.textContent = res.message + "，已清空内存缓存";
@@ -589,7 +643,7 @@ el.clearBtn.addEventListener("click", clearCache);
 // 用户关掉悬浮窗后它就变成看不见的僵尸进程，下次启动还占着 8765 端口。
 // sendBeacon 在 pagehide/beforeunload 里依然能发出去，比 fetch 可靠。
 function notifyShutdown() {
-  const url = "http://127.0.0.1:8765/shutdown";
+  const url = BASE + "/shutdown";
   try {
     if (navigator.sendBeacon) {
       navigator.sendBeacon(url, "1");

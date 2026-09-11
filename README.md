@@ -112,6 +112,8 @@ This project is **portable** — no hard-coded user paths. Copy the whole folder
 | `poll_interval` | Polling interval (seconds) | `0.1` |
 | `auto_exit_on_overlay_close` | Shut the backend down when the overlay window closes (set `false` when running `server.py` manually for debugging) | `true` |
 | `overlay_idle_timeout` | Fallback: seconds without any frontend request before assuming the overlay is gone (covers browser crashes) | `90` |
+| `overlay_window_ratio` | Initial overlay size = screen work area × this ratio (`[width, height]`, about 1/7 of screen width) | `[0.135, 0.22]` |
+| `overlay_window_size` | Explicit initial overlay size in pixels (`[width, height]`; takes priority over the ratio) | `null` |
 
 > The port can also be overridden with the `RESOLVE_SYNC_PORT` environment variable (useful for a second instance or automated tests).
 

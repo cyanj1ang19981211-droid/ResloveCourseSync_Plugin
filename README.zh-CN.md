@@ -103,6 +103,8 @@ python overlay.py    # 启动悬浮窗
 | `poll_interval` | 轮询间隔（秒） | `0.1` |
 | `auto_exit_on_overlay_close` | 关掉悬浮窗后是否自动结束后端（手动跑 `server.py` 调试时可设 `false`） | `true` |
 | `overlay_idle_timeout` | 兜底：前端多少秒无请求就认定已关闭（应对浏览器崩溃） | `90` |
+| `overlay_window_ratio` | 悬浮窗初始尺寸 = 屏幕工作区 × 该比例（`[宽, 高]`，约屏宽 1/7、屏高 1/5） | `[0.135, 0.22]` |
+| `overlay_window_size` | 直接指定悬浮窗初始尺寸（像素，`[宽, 高]`；优先级高于上面的比例） | `null` |
 
 > 端口也可以用环境变量 `RESOLVE_SYNC_PORT` 临时覆盖（跑第二个实例或自动化测试时有用）。
 
