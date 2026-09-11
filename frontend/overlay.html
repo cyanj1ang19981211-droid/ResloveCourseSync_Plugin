@@ -182,8 +182,9 @@
     align-items: flex-end;
     gap: 8px;
     min-height: 22px;
+    min-width: 0;
   }
-  .statuscol { flex: 1 1 auto; min-width: 0; }
+  .statuscol { flex: 1 1 auto; min-width: 0; overflow: hidden; }
   .status {
     font-size: 11px;
     color: var(--muted);
@@ -197,8 +198,10 @@
     font-family: "Consolas", monospace;
   }
 
+  /* 按钮允许被压缩（极端窄的窗口下宁可把文字省略，也不能被挤出可视区） */
   .clear-btn {
-    flex: 0 0 auto;
+    flex: 0 1 auto;
+    min-width: 0;
     background: transparent;
     color: var(--muted);
     border: 1px solid var(--border);
@@ -208,6 +211,8 @@
     cursor: pointer;
     font-family: inherit;
     white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
     transition: color .15s, border-color .15s, background .15s;
   }
   .clear-btn:hover {
