@@ -12,6 +12,8 @@
     - 跑步机  D列「建议速度(km/h)」-> speed   E列「建议阻力/坡度」-> incline
     - 单车    D列「RPM(踏频)」       -> rpm     E列「阻力」         -> resistance
     - 划船机  D列「SPM(桨频)」       -> spm     E列「阻力」         -> resistance
+    - 椭圆机  D列「RPM(转速)」       -> rpm     E列「阻力」         -> resistance
+    - 爬楼机  D列「建议速度」        -> speed   E列「建议阻力/坡度」-> resistance
 
 扩展方式：新增一个器械，只需在 EQUIPMENTS 里加一个条目即可。
 """
@@ -61,6 +63,20 @@ EQUIPMENTS = {
         "fields": [
             {"key": "rpm",        "label": "转速",   "unit": "rpm",   "required": True,  "priority": 1},
             {"key": "resistance", "label": "阻力",   "unit": "级",    "required": False, "priority": 2},
+        ],
+    },
+
+    # ---------- 爬楼机（楼梯机 / 磁控爬楼机） ----------
+    # 课件列与跑步机同构：「建议速度」+「建议阻力/坡度」，但没有 km/h 的概念
+    # （爬楼机是原地蹬踏，速度就是档位），所以速度单位写「级」。
+    # 阻力列在早期的爬楼机课件里是空的（机型没上磁控阻力），接不到值就自动隐藏，
+    # 后期「低阻/高阻」那批课件有阻力值时自然会显示出来。
+    "stairclimber": {
+        "name": "爬楼机",
+        "fields": [
+            {"key": "speed",      "label": "速度",   "unit": "级",    "required": True,  "priority": 1},
+            {"key": "resistance", "label": "阻力",   "unit": "级",    "required": False, "priority": 2},
+            {"key": "distance",   "label": "距离",   "unit": "km",    "required": False, "priority": 3},
         ],
     },
 
@@ -224,11 +240,69 @@ def is_compound_action(eq_type: str, action_name: str) -> bool:
     return score_action(eq_type, action_name) >= 0.8
 
 
-def detect_equipment(sheet_name: str) -> str:
-    """根据工作表名前缀判断器械类型 key。"""
+# ---------------------------------------------------------------------------
+# 器械关键词表（用于「名称里没有器械前缀」时的兜底识别）
+#
+# 背景：课件 xlsx 有两种做法——
+#   1) 老的总表「冠军课程课件.xlsx」：工作表名自带器械前缀，如「跑步机-爬坡模拟训练」；
+#   2) 新的单课表（一节课一个 xlsx，如「20min舒缓解压轻氧攀登.xlsx」）：
+#      工作表名往往叫 Sheet1，或者只有课程名，**看不到器械前缀**。
+#
+# 所以识别顺序是：工作表名前缀 -> 工作表名关键词 -> 文件名关键词 -> 文件路径关键词。
+# 路径很关键：这些课件通常放在「20260902爬楼机课程/课程课件/」这类目录里，
+# 目录名本身就把器械说清楚了。全部识别不出来时才退回徒手课。
+#
+# 注意：关键词要选「歧义小」的。例如「登山」不能用于爬楼机——跑步机课里也有
+# 「越野登山实战模拟」；「跑」也不能太泛，所以跑步机只放比较明确的组合词。
+# ---------------------------------------------------------------------------
+EQUIPMENT_KEYWORDS = (
+    # (器械 key, 关键词列表)
+    # 顺序有讲究：越靠前越优先。把「特征更明确」的器械放前面，
+    # 跑步机放最后（它的关键词最泛，容易抢别人的课）。
+    ("stairclimber", ["爬楼机", "爬楼", "楼梯机", "楼梯", "登楼", "攀登", "攀爬"]),
+    ("rower",        ["划船机", "划船", "赛艇", "桨频"]),
+    ("elliptical",   ["椭圆机", "椭圆"]),
+    ("bike",         ["动感单车", "室内单车", "单车", "骑行", "踏频"]),
+    ("treadmill",    ["跑步机", "跑步", "走跑", "跑姿", "慢跑", "快跑", "爬坡", "坡度", "配速"]),
+)
+
+
+def detect_equipment(sheet_name: str, *hints: str) -> str:
+    """判断课程属于哪种器械。
+
+    参数：
+        sheet_name : 工作表名
+        *hints     : 其他线索（文件名、文件路径等），按顺序作为兜底
+
+    识别顺序：
+        1. 工作表名的**器械前缀**（最可靠，老总表就是这个格式）；
+        2. 工作表名的**关键词**（如「20min舒缓解压轻氧攀登」里的「攀登」）；
+        3. 各 hints 里的关键词（如文件名 / 所在文件夹名里的「爬楼机」）；
+        4. 都识别不出来 → "bodyweight"（徒手课，沿用旧行为）。
+
+    返回器械 key（见 EQUIPMENTS）。
+    """
+    name = (sheet_name or "").strip()
+
+    # 1) 前缀判断：老总表的「跑步机-XXX」这类写法
     for prefix, eq in (("跑步机", "treadmill"), ("单车", "bike"),
                        ("划船机", "rower"), ("椭圆机", "elliptical"),
+                       ("爬楼机", "stairclimber"), ("楼梯机", "stairclimber"),
                        ("徒手", "bodyweight")):
-        if sheet_name.strip().startswith(prefix):
+        if name.startswith(prefix):
             return eq
+
+    # 2)+3) 关键词判断：先看工作表名，再看文件名/路径
+    candidates = [name]
+    for h in hints:
+        h = (h or "").strip()
+        if h:
+            candidates.append(h)
+    for text in candidates:
+        for eq, kws in EQUIPMENT_KEYWORDS:
+            for kw in kws:
+                if kw in text:
+                    return eq
+
+    # 4) 兜底：徒手
     return "bodyweight"

@@ -3,16 +3,23 @@
 convert_course.py —— 课件转换的「图形化」入口（双击 convert.bat 时调用）。
 
 流程：
-    1. 弹出 Windows 原生的「打开文件」对话框，让用户挑课件表格（默认定位到桌面）；
-    2. 调用 xlsx_to_json.convert_file() 把课件里所有工作表转成 data/*.json；
+    1. 弹出 Windows 原生的「打开文件」对话框，让用户挑课件表格（**支持多选**：
+       按住 Ctrl 点选多个文件，或框选一批；也可以直接框选整个文件夹里的表格）；
+    2. 逐个调用 xlsx_to_json.convert_file() 转成 data/*.json；
     3. 控制台打印结果；出错时弹系统提示框，避免新手不知道哪里错了。
+
+为什么要支持多选：
+    现在课件是「一节课一个 xlsx」（例如 20min舒缓解压轻氧攀登.xlsx、
+    35min变速循环燃脂攀登.xlsx …），一次要导好几节。老版本一次只能选一个，
+    选完还要重新双击 convert.bat，很烦。
 
 为什么路径要绕一圈临时文件：
     cmd 控制台默认是 GBK 代码页，中文路径经命令行传递容易乱码。
-    这里让 PowerShell 把选中的路径按 UTF-8 写进临时文件，再由 Python（UTF-8）
-    读取，全程不经过 cmd 的编码转换。
+    这里让 PowerShell 把选中的路径按 UTF-8 写进临时文件（一行一个），
+    再由 Python（UTF-8）读取，全程不经过 cmd 的编码转换。
 
-也支持把 xlsx 直接拖到 convert.bat 上：此时参数会透传进来，跳过文件选择框。
+也支持把 xlsx 直接拖到 convert.bat 上（可以一次拖多个）：此时参数会透传进来，
+跳过文件选择框。
 """
 
 import base64
@@ -29,6 +36,10 @@ from xlsx_to_json import convert_file  # noqa: E402
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
+RUNTIME_DIR = os.path.join(BASE_DIR, ".runtime")
+
+# 记住上次选文件的目录：课件常在网络盘（\\xxx\课程课件）里，每次重新点一遍很烦
+LAST_DIR_FILE = os.path.join(RUNTIME_DIR, "last_convert_dir.txt")
 
 # 没有图形界面时（极端环境下）退回转换的默认课件
 DEFAULT_XLSX = os.path.join(os.path.expanduser("~"), "Desktop", "冠军课程课件.xlsx")
@@ -53,6 +64,30 @@ def message_box(text, title="课件转换", warn=False):
         pass
 
 
+# ---------- 「上次用过的目录」记忆 ----------
+
+def _read_last_dir():
+    """读上次选文件的目录；没有/已失效返回空串。"""
+    try:
+        with open(LAST_DIR_FILE, "r", encoding="utf-8") as f:
+            d = f.read().strip()
+        if d and os.path.isdir(d):
+            return d
+    except OSError:
+        pass
+    return ""
+
+
+def _write_last_dir(path):
+    """记住这次选的文件所在目录（下次对话框直接开在这里）。"""
+    try:
+        os.makedirs(RUNTIME_DIR, exist_ok=True)
+        with open(LAST_DIR_FILE, "w", encoding="utf-8") as f:
+            f.write(os.path.dirname(os.path.abspath(path)))
+    except OSError:
+        pass
+
+
 # ---------- 文件选择框 ----------
 
 # 用 -EncodedCommand（base64 UTF-16LE）传脚本，彻底绕开 PowerShell 对中文脚本的
@@ -65,21 +100,25 @@ $owner.ShowInTaskbar = $false
 $owner.WindowState = 'Minimized'
 
 $dlg = New-Object System.Windows.Forms.OpenFileDialog
-$dlg.Title = '选择课程课件表格'
+$dlg.Title = '选择课程课件表格（可按住 Ctrl / Shift 一次选多个）'
 $dlg.Filter = 'Excel 课件 (*.xlsx;*.xlsm)|*.xlsx;*.xlsm|所有文件 (*.*)|*.*'
 $dlg.CheckFileExists = $true
-$dlg.Multiselect = $false
+$dlg.Multiselect = $true
 $dlg.RestoreDirectory = $true
-$desktop = [Environment]::GetFolderPath('Desktop')
-if (Test-Path $desktop) { $dlg.InitialDirectory = $desktop }
+
+$init = $env:RESOLVE_PICK_DIR
+if ([string]::IsNullOrWhiteSpace($init) -or -not (Test-Path -LiteralPath $init)) {
+    $init = [Environment]::GetFolderPath('Desktop')
+}
+if (Test-Path -LiteralPath $init) { $dlg.InitialDirectory = $init }
 
 $result = $dlg.ShowDialog($owner)
 $owner.Dispose()
 
 if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
-    [System.IO.File]::WriteAllText(
+    [System.IO.File]::WriteAllLines(
         $env:RESOLVE_PICK_OUT,
-        $dlg.FileName,
+        [string[]]$dlg.FileNames,
         (New-Object System.Text.UTF8Encoding($false))
     )
 }
@@ -87,7 +126,10 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
 
 
 def _pick_with_powershell():
-    """用 PowerShell 的 OpenFileDialog 选文件。返回路径；取消返回 None；不可用返回 ""。"""
+    """用 PowerShell 的 OpenFileDialog 多选文件。
+
+    返回：文件列表（list）；用户取消 -> None；PowerShell 不可用 -> ""。
+    """
     out_file = os.path.join(tempfile.gettempdir(), "resolve_course_pick.txt")
     try:
         if os.path.exists(out_file):
@@ -98,6 +140,7 @@ def _pick_with_powershell():
     encoded = base64.b64encode(_PS_PICK.encode("utf-16-le")).decode("ascii")
     env = dict(os.environ)
     env["RESOLVE_PICK_OUT"] = out_file
+    env["RESOLVE_PICK_DIR"] = _read_last_dir()
 
     try:
         subprocess.run(
@@ -114,16 +157,19 @@ def _pick_with_powershell():
     if os.path.exists(out_file):
         try:
             with open(out_file, "r", encoding="utf-8") as f:
-                path = f.read().strip()
+                paths = [ln.strip() for ln in f.read().splitlines() if ln.strip()]
         except OSError:
             return ""
-        if path and os.path.exists(path):
-            return path
+        paths = [p for p in paths if os.path.exists(p)]
+        return paths or None
     return None            # PowerShell 跑通了，但用户点了取消
 
 
 def _pick_with_tkinter():
-    """PowerShell 不可用时的备选：用 tkinter 的原生文件对话框。不可用返回 ""。"""
+    """PowerShell 不可用时的备选：用 tkinter 的原生文件对话框（同样支持多选）。
+
+    返回：文件列表；用户取消 -> None；tkinter 不可用 -> ""。
+    """
     try:
         import tkinter
         from tkinter import filedialog
@@ -134,9 +180,9 @@ def _pick_with_tkinter():
         root = tkinter.Tk()
         root.withdraw()
         root.attributes("-topmost", True)
-        initial = os.path.expanduser("~/Desktop")
-        path = filedialog.askopenfilename(
-            title="选择课程课件表格",
+        initial = _read_last_dir() or os.path.expanduser("~/Desktop")
+        picked = filedialog.askopenfilenames(
+            title="选择课程课件表格（可一次选多个）",
             initialdir=initial if os.path.isdir(initial) else os.path.expanduser("~"),
             filetypes=[("Excel 课件", "*.xlsx *.xlsm"), ("所有文件", "*.*")],
         )
@@ -144,11 +190,11 @@ def _pick_with_tkinter():
     except Exception:
         return ""
 
-    return path or None
+    return list(picked) or None
 
 
-def pick_course_file():
-    """弹出文件选择框，返回选中路径；用户取消返回 None。"""
+def pick_course_files():
+    """弹出文件选择框（可多选），返回文件路径列表；用户取消返回 None。"""
     for picker in (_pick_with_powershell, _pick_with_tkinter):
         result = picker()
         if result != "":
@@ -161,29 +207,31 @@ def pick_course_file():
 def main():
     args = [a for a in sys.argv[1:] if a and a.strip()]
 
-    print("=" * 46)
+    print("=" * 52)
     print("  课件数据转换（xlsx -> JSON）")
-    print("=" * 46)
+    print("=" * 52)
     print()
 
     if args:
-        # 拖拽进来的文件：直接用，不弹框
-        xlsx_path = args[0]
-        print(f"待转换文件：{xlsx_path}")
+        # 拖拽进来的文件：直接用，不弹框（支持一次拖多个）
+        xlsx_paths = args
+        print(f"待转换文件（{len(xlsx_paths)} 个）：")
+        for p in xlsx_paths:
+            print(f"  {p}")
     else:
-        print("请在弹出的窗口里选择课件表格…")
-        xlsx_path = pick_course_file()
+        print("请在弹出的窗口里选择课件表格（可按住 Ctrl / Shift 多选）…")
+        picked = pick_course_files()
 
-        if xlsx_path is None:
+        if picked is None:
             print()
             print("已取消：没有选择文件，未做任何修改。")
             return 0
 
-        if xlsx_path == "":
+        if picked == "":
             # 图形界面不可用 → 退回桌面默认课件，保持老习惯能用
             if os.path.exists(DEFAULT_XLSX):
-                xlsx_path = DEFAULT_XLSX
-                print(f"（图形界面不可用）改用桌面默认课件：{xlsx_path}")
+                xlsx_paths = [DEFAULT_XLSX]
+                print(f"（图形界面不可用）改用桌面默认课件：{DEFAULT_XLSX}")
             else:
                 print()
                 print("[错误] 无法弹出文件选择框，也没找到桌面上的「冠军课程课件.xlsx」。")
@@ -194,37 +242,76 @@ def main():
                     warn=True,
                 )
                 return 1
+        else:
+            xlsx_paths = picked
+            print(f"已选择 {len(xlsx_paths)} 个文件：")
+            for p in xlsx_paths:
+                print(f"  {p}")
 
-        print(f"已选择：{xlsx_path}")
+    # 记住这次选的目录，下次打开对话框直接定位过去
+    _write_last_dir(xlsx_paths[0])
 
     print()
     print(f"输出目录：{DATA_DIR}")
-    print("-" * 46)
+    print("-" * 52)
 
-    try:
-        result = convert_file(xlsx_path, out_dir=DATA_DIR)
-    except ValueError as e:
+    total_ok = 0
+    total_outputs = []
+    failed = []      # [(文件, 原因)]
+    skipped = []     # [(文件/工作表, 原因)]
+    for idx, xlsx_path in enumerate(xlsx_paths, 1):
         print()
-        print(f"[错误] {e}")
-        message_box(f"转换失败：\n\n{e}", title="课件转换失败", warn=True)
-        return 1
-
-    print("-" * 46)
-    print()
-    print(f"转换完成：成功 {result['ok']} 个课件，输出到 data 目录。")
-    if result["skipped"]:
-        print(f"跳过 {len(result['skipped'])} 个：")
+        print(f"[{idx}/{len(xlsx_paths)}] {os.path.basename(xlsx_path)}")
+        try:
+            result = convert_file(xlsx_path, out_dir=DATA_DIR)
+        except ValueError as e:
+            print(f"  [错误] {e}")
+            failed.append((xlsx_path, str(e)))
+            continue
+        total_ok += result["ok"]
+        total_outputs.extend(result["outputs"])
         for name, reason in result["skipped"]:
-            print(f"  - {name}：{reason}")
+            skipped.append((f"{os.path.basename(xlsx_path)} / {name}", reason))
 
-    if result["ok"] == 0:
+    print()
+    print("-" * 52)
+    print()
+    print(f"全部完成：{len(xlsx_paths)} 个文件，共成功转换 {total_ok} 个课件。")
+    if total_outputs:
+        print(f"输出到：{DATA_DIR}")
+        for name in total_outputs:
+            print(f"  - {name}")
+    if skipped:
+        print(f"跳过 {len(skipped)} 个工作表：")
+        for name, reason in skipped:
+            print(f"  - {name}：{reason}")
+    if failed:
+        print(f"失败 {len(failed)} 个文件：")
+        for path, reason in failed:
+            print(f"  - {os.path.basename(path)}：{reason}")
+
+    # 全部失败 / 一个课件都没转出来才弹框报警；部分成功只在控制台说明
+    if total_ok == 0:
         message_box(
             "没有转换出任何课程数据。\n\n"
-            "请确认选择的表格里含有课件工作表（表头应包含「环节」或「动作名称」）。",
+            + "\n".join(f"- {os.path.basename(p)}：{r}" for p, r in failed[:5])
+            + ("\n…" if len(failed) > 5 else "")
+            + "\n\n请确认选择的表格里含有课件工作表"
+              "（表头应包含「环节」或「动作名称」）。",
             title="课件转换失败",
             warn=True,
         )
         return 1
+
+    if failed:
+        message_box(
+            f"成功转换 {total_ok} 个课件，但有 {len(failed)} 个文件转换失败：\n\n"
+            + "\n".join(f"- {os.path.basename(p)}" for p, _ in failed[:5])
+            + ("\n…" if len(failed) > 5 else "")
+            + "\n\n详细原因见转换窗口里的提示。",
+            title="部分文件转换失败",
+            warn=True,
+        )
 
     return 0
 

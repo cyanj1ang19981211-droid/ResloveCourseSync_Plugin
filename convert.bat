@@ -16,12 +16,12 @@ if "%PY%"=="" (
     exit /b 1
 )
 
-rem 带参数时（把 xlsx 拖到本文件上）→ 直接转换该文件；
-rem 不带参数时（双击）→ 弹出文件选择框，让用户挑课件。
+rem 带参数时（把 xlsx 拖到本文件上，可以一次拖多个）→ 直接转换这些文件；
+rem 不带参数时（双击）→ 弹出文件选择框，支持按住 Ctrl / Shift 多选课件。
 if "%~1"=="" (
     %PY% convert_course.py
 ) else (
-    %PY% convert_course.py "%~1"
+    %PY% convert_course.py %*
 )
 
 set "RC=%ERRORLEVEL%"

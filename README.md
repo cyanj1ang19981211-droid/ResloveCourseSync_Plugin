@@ -57,9 +57,14 @@ In Resolve: **DaVinci Resolve → Preferences → System → General**, set
 
 **Method A (recommended): double-click `convert.bat` and pick the course file in the dialog**
 
-A native Windows "Open file" dialog appears (starting at your Desktop) — just select the course workbook. No paths to remember, no drag-and-drop required.
+A native Windows "Open file" dialog appears (starting in the folder you used last time, Desktop on first run) — just select the course workbook. No paths to remember, no drag-and-drop required.
 
-You can still **drag an `.xlsx` onto `convert.bat`** to skip the dialog and convert that file directly.
+**You can select several files at once**: hold `Ctrl` to pick individually or `Shift` to select a
+range, then hit "Open" — they are all converted in one go. You can also **drag multiple `.xlsx`
+files onto `convert.bat`** at the same time to skip the dialog entirely.
+
+This is aimed at the newer "one xlsx per lesson" layout (e.g. `20min舒缓解压轻氧攀登.xlsx`):
+drag a whole batch in and you're done.
 
 **Method B: use the button in the overlay window** (no need to quit the plugin)
 
@@ -74,12 +79,26 @@ The button in the bottom-right corner has two roles, decided by how many course 
 So after clearing the cache you can re-import a course file **without restarting the plugin**; once
 the conversion finishes the button flips back to "clear cache".
 
-The converter parses every worksheet (treadmill / bike / rower / elliptical / bodyweight all supported) and writes the JSON files into `data/`.
+The converter parses every worksheet (treadmill / stair climber / bike / rower / elliptical / bodyweight
+all supported) and writes the JSON files into `data/`.
+
+It identifies columns **by header text instead of fixed column letters**, so it handles both course
+layout generations:
+
+| Layout | Shape | Header row | Course name taken from |
+|---|---|---|---|
+| Legacy master sheet | many worksheets in one xlsx | row 3 | worksheet name (e.g. `跑步机-爬坡模拟训练`) |
+| New per-lesson sheet | one xlsx per lesson | row 1 | worksheet name; falls back to the file name when it is a default like `Sheet1` |
+
+Equipment type is detected from the worksheet's equipment prefix first, then from keywords in the
+worksheet name / file name / folder path (e.g. `35min高阻低频力量攀登.xlsx` inside a
+`20260902爬楼机课程/课程课件/` folder is recognised as a stair climber via `攀登` and the folder name).
 
 **Command line** (for scripting/debugging):
 
 ```bat
 python convert_course.py "C:\path\to\course.xlsx"
+python convert_course.py a.xlsx b.xlsx c.xlsx             # convert several at once
 python xlsx_to_json.py "C:\path\to\course.xlsx"          # equivalent CLI-only entry point
 ```
 
@@ -178,15 +197,25 @@ If auto-detection fails, set `resolve_script_path` to this path.
 | Equipment key | Name | Fields |
 |---|---|---|
 | `treadmill` | Treadmill | speed km/h · pace · incline % · distance |
+| `stairclimber` | Stair Climber | speed level · resistance level · distance |
 | `bike` | Spin Bike | cadence rpm · resistance · power |
 | `rower` | Rowing Machine | stroke rate spm · resistance · split pace |
 | `elliptical` | Elliptical | rotation rpm · resistance |
 | `bodyweight` | Bodyweight | (no equipment metrics; action/segment only) |
 
-**Real course-field mapping** (from the original `冠军课程课件.xlsx`):
-- Treadmill: col D "建议速度(km/h)" → `speed`, col E "建议阻力/坡度" → `incline`
-- Bike: col D "RPM" → `rpm`, col E "阻力" → `resistance`
-- Rower: col D "SPM" → `spm`, col E "阻力" → `resistance`
+**Real course-field mapping** (matched by header text):
+- Treadmill: header "建议速度(km/h)" → `speed`, header "建议阻力/坡度" → `incline`
+- Stair climber: header "建议速度" → `speed` (a **level**, not km/h), header "建议阻力/坡度"
+  → `resistance` (only present on magnetically-braked models; hidden when empty)
+- Bike: header "RPM" → `rpm`, header "阻力" → `resistance`
+- Rower: header "SPM" → `spm`, header "阻力" → `resistance`
+
+> Stair climber vs. incline treadmill: a treadmill's speed is real (km/h, convertible to pace),
+> while a stair climber steps in place — the course sheet's "建议速度" is really a **level**, so the
+> unit is "级" (level) and no pace is derived. Everything else (constant per segment, optional
+> fields hidden when absent) is identical to the treadmill.
+
+26 courses are converted with the project (treadmill 10 / bike 5 / rower 3 / elliptical 3 / bodyweight 5).
 
 ## FAQ
 
@@ -198,18 +227,24 @@ If auto-detection fails, set `resolve_script_path` to this path.
 - **The panel freezes for a second while scrubbing the timeline**: expected. DaVinci does not
   report the playhead during a drag, so the last frame is kept on screen instead of flashing
   back to the waiting state; it refreshes as soon as you let go.
-- **Bodyweight courses not converted**: bodyweight training counts "reps", has no equipment metrics, and its timeline is incomplete, so it isn't auto-converted yet and needs a separate design.
+- **Stair-climber "resistance" not shown**: expected. Early stair-climber sheets leave the
+  resistance column at 0/empty, and empty optional fields are hidden; sheets from
+  magnetically-braked models (e.g. MR2616) do carry values and will show it.
+- **Converted several files but `data/` gained fewer JSONs**: some worksheets share the same name,
+  so their output overwrote each other. The console lists every "worksheet -> JSON file" pair —
+  compare those to spot the collision.
 
 ## Versioning
 
 This project follows [Semantic Versioning](https://semver.org/).
 
+- **v0.3.0** — Stair climber support (speed shown as a level + resistance/distance); `convert.bat` accepts multiple files at once; the parser now identifies columns by header text and handles the "one xlsx per lesson" layout.
+- **v0.2.0** — Graphical startup and conversion, screen-ratio overlay sizing, built-in always-on-top with a pin toggle, dual-role action button.
 - **v0.1.0** — Initial release: equipment-based course adaptation (treadmill / bike / rower / elliptical / bodyweight) + basic overlay.
 
 ## Roadmap
 
 - **Multi-language course adaptation** — configurable header/label detection and equipment-name prefix matching for non-Chinese course files.
-- **Bodyweight course adaptation** — a dedicated data model for rep/set-based training (no equipment metrics, non-continuous timeline).
 - **Frontend polish + course cache invalidation** — in-memory course caching, `data/` reload, and a "clear cache" endpoint.
 
 ## License

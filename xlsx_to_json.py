@@ -10,25 +10,35 @@ xlsx_to_json.py —— 把「冠军课程课件.xlsx」里的课件表转换成�
 依赖：标准库（zipfile + xml.etree），无需 openpyxl。
 （openpyxl 在解析该 xlsx 的样式时存在兼容问题，故直接用底层 XML 解析，更稳健。）
 
-字段映射（xlsx 列 -> 插件 JSON）：
-    A 环节          -> segment（环节名，空则继承上一个非空环节）
-    B 动作名称      -> action
-    C 关键词        -> keyword（强度标签）
-    D 建议速度/RPM/SPM -> 主指标（跑步机 speed / 单车 rpm / 划船机 spm）
-    E 建议阻力/坡度 -> 副指标（跑步机 incline / 单车·划船机 resistance）
-    F 持续时间(原始) -> 时长（Excel 天序列，×24 = 分钟）
-    G 持续时间(计算) -> 时长（分钟，优先用这列）
-    H 预计距离      -> distance（米 -> 公里）
+字段映射（xlsx 列 -> 插件 JSON）——**按表头文字识别，不再写死列号**：
+    表头含「环节」/「阶段」         -> segment（环节名，空则继承上一个非空环节）
+    表头含「动作」                 -> action
+    表头含「关键词」/「标签」      -> keyword（强度标签）
+    表头含「速度/踏频/桨频/转速/频率/步频」 -> 主指标（跑步机/爬楼机 speed、单车/椭圆机 rpm、划船机 spm）
+    表头含「阻力/坡度/档位」       -> 副指标（跑步机 incline、其余 resistance）
+    表头含「持续时间」/「时长」    -> 时长（分钟；若只有一个「持续时间」列且是
+                                      Excel 天分数，会自动 ×24 换算成分钟）
+    表头含「距离」/「里程」        -> distance（米 -> 公里）
 
 器械主/副指标映射：
     跑步机 D->speed(km/h)  E->incline(%)  + 自动换算 pace(min/km)
+    爬楼机 D->speed(级)    E->resistance(级)
     单车   D->rpm(rpm)     E->resistance(级)
     划船机 D->spm(spm)     E->resistance(级)
     椭圆机 D->rpm(rpm)     E->resistance(级)
+
+为什么改成「按表头识别」：
+    团队现在有两种课件表格——
+      (1) 老的总表：一个 xlsx 里很多工作表，表头在第 3 行，
+          列序是 A环节 B动作名称 C关键词 D速度 E阻力/坡度 F持续时间(天) G持续时间(分钟) H距离；
+      (2) 新的单课表：一节课一个 xlsx（工作表常叫 Sheet1），表头在第 1 行，
+          列序变成 A环节 B动作名称 C关键词 D速度 E阻力/坡度 F持续时间 G距离 H消耗。
+    按列号写死会把 (2) 的「距离」当成「时长」（300 米 -> 300 分钟），所以改成看表头。
 """
 
 import json
 import os
+import re
 import sys
 import zipfile
 import xml.etree.ElementTree as ET
@@ -40,12 +50,179 @@ NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 
 # 器械类型 -> (主指标 key, 副指标 key)
 EQUIP_METRICS = {
-    "treadmill":   ("speed",     "incline"),
-    "bike":        ("rpm",       "resistance"),
-    "rower":       ("spm",       "resistance"),
-    "elliptical":  ("rpm",       "resistance"),
-    "bodyweight":  (None,        None),
+    "treadmill":    ("speed",  "incline"),
+    "stairclimber": ("speed",  "resistance"),
+    "bike":         ("rpm",    "resistance"),
+    "rower":        ("spm",    "resistance"),
+    "elliptical":   ("rpm",    "resistance"),
+    "bodyweight":   (None,     None),
 }
+
+# 表头文字 -> 语义列。按顺序匹配，先命中的角色生效（每个表头只归一个角色）。
+# 注意「动作名称」要在「速度」之前判断不到冲突，但「建议速度(km/h)/踏频/桨频」
+# 这种复合表头必须能命中 main，所以关键词要写全。
+HEADER_ROLE_KEYWORDS = (
+    ("segment",  ("环节", "阶段")),
+    ("action",   ("动作",)),
+    ("keyword",  ("关键词", "标签")),
+    ("main",     ("速度", "踏频", "桨频", "转速", "频率", "步频", "spm", "rpm")),
+    ("sub",      ("阻力", "坡度", "档位")),
+    ("duration", ("持续时间", "时长")),
+    ("distance", ("距离", "里程")),
+    ("calories", ("消耗", "卡路里", "kcal")),
+)
+
+
+def _to_float(v):
+    """字符串 -> float；转不了返回 None。"""
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _cell_text(row, col):
+    """取某行某列的文字值；空/空白返回 None。"""
+    if col is None:
+        return None
+    v = row.get(col)
+    if v is None:
+        return None
+    v = str(v).strip()
+    return v if v != "" else None
+
+
+def find_header_row(rows):
+    """定位表头行：A~其他列里出现「环节」或「动作名称」的那一行。
+
+    老总表表头在第 3 行、新单课表在第 1 行，所以这里不写死行号。
+    返回下标；找不到返回 None。
+    """
+    for i, row in enumerate(rows):
+        for v in row.values():
+            s = str(v or "").strip()
+            if s in ("环节", "动作名称"):
+                return i
+    return None
+
+
+def build_colmap(header_row):
+    """把表头行解析成 {语义角色: [列字母, ...]}（列按 A/B/C... 顺序）。
+
+    同一个角色可能出现多列（例如老总表有两列都叫「持续时间」）。
+    """
+    colmap = {}
+    for col in sorted(c for c in header_row.keys() if c):
+        text = str(header_row.get(col) or "").strip().lower()
+        if not text:
+            continue
+        for role, kws in HEADER_ROLE_KEYWORDS:
+            if any(kw.lower() in text for kw in kws):
+                colmap.setdefault(role, []).append(col)
+                break
+    return colmap
+
+
+# 无意义的工作表名（新单课表往往只有一张表，默认名就是 Sheet1）
+_GENERIC_SHEET_RE = re.compile(r"^(sheet|工作表|工作簿)\s*\d*$", re.IGNORECASE)
+
+
+def effective_course_name(sheet_name, source_name="", single_sheet=False):
+    """确定课程名（也就是生成的 JSON 文件名、匹配达芬奇时间线用的名字）。
+
+    工作表名有意义时直接用它（老总表是「跑步机-爬坡模拟训练」这种）；
+    工作表名是 Sheet1 / 工作表1 这类默认名时，改用**文件名**（去掉扩展名）——
+    新单课表就是一节课一个 xlsx，文件名才是真正的课程名。
+    否则所有单课表都会叫 Sheet1.json 互相覆盖。
+
+    参数 single_sheet：整个 xlsx 只有一张工作表（新单课表就是这样）。
+    此时再补一条规则——**取「文件名」和「工作表名」里更长的那个**：
+    新单课表里两边通常都写着课程名（一样长，随便取）；
+    但如果工作表名是个短的通用词（「课程」「课件」「Sheet1」），
+    用文件名才不会被多个文件撞成同一个 JSON 互相覆盖。
+    多表工作簿（老总表）不启用这条，照旧以工作表名为准。
+    """
+    name = str(sheet_name or "").replace("\n", "").strip()
+    stem = ""
+    if source_name:
+        stem = os.path.splitext(os.path.basename(str(source_name)))[0].strip()
+    if not stem:
+        return name
+    if not name or _GENERIC_SHEET_RE.match(name):
+        return stem
+    # 单表工作簿：名字明显更短的一方多半是通用词，取更具体的那个
+    if single_sheet and len(stem) > len(name) and name not in stem:
+        return stem
+    return name
+
+
+def target_course_minutes(sheet_name, meta=None):
+    """猜这节课的总时长（分钟）：优先从工作表名里读（如「20min综合能力提升」）。"""
+    m = re.search(r"(\d+)\s*(?:min|分钟)", str(sheet_name or ""), re.IGNORECASE)
+    if m:
+        return float(m.group(1))
+    raw = str((meta or {}).get("duration_min") or "")
+    m = re.search(r"\d+(?:\.\d+)?", raw)
+    if m:
+        return float(m.group(0))
+    return None
+
+
+def choose_duration_col(rows, cols, sheet_name, meta=None, log=None):
+    """在候选「持续时间」列里挑一列，并判断它的单位。
+
+    两种单位都见过（同一张表里两列都叫「持续时间」，只是格式不同）：
+        - 分钟原值（老总表的 G 列、新单课表的「持续时间」）  -> 直接 ×60 得秒
+        - Excel 天分数（老总表的 F 列、新单课表单独的「持续时间」列）
+          -> ×24 才是分钟（例如 0.0416667 × 24 = 1 分钟）
+
+    判别办法：**看这一列的数值量级**。
+        天分数永远是 <1 的小数（0.02~0.17 之间，因为一节课的单个环节不会超过 24 小时）；
+        分钟原值只要有一个环节长度 ≥ 1 分钟就会出现 ≥1 的数。
+      所以「列里出现过 ≥1 的值」就按分钟读，全是 <1 的小数就按天分数读。
+      两列同时存在时，优先用能按分钟读的那列（就是 G 列）。
+
+    如课程名里写了总时长（「20min综合能力提升」），再用它复核一遍：
+    哪个单位算出来的总时长更接近目标，就用哪个。
+
+    返回 (列字母, 单位, {列字母: 单位})：
+        第 1 个是首选列，第 2 个是它的单位（"min" / "day"）。
+        第 3 个是**每个候选列各自的单位**——必须有，因为老总表里有些行
+        只有 F 列（天分数）、没有 G 列，回退用 F 时若沿用 G 的分钟单位，
+        0.104 天会被当成 0.104 分钟（少算 144 秒）。
+    找不到可用列返回 (cols[0] 或 None, "min", {})。
+    """
+    target = target_course_minutes(sheet_name, meta)
+    candidates = []   # (unit, col, total_minutes)
+    for c in cols:
+        vals = [v for v in (_to_float(_cell_text(r, c)) for r in rows)
+                if v is not None and v > 0]
+        if not vals:
+            continue
+        unit = "min" if max(vals) >= 1.0 else "day"
+        total = sum(vals) * (24.0 if unit == "day" else 1.0)
+        # 课程名里给了总时长时，按目标复核；差太多就换另一种读法
+        if target:
+            other_unit = "day" if unit == "min" else "min"
+            other_total = sum(vals) * (24.0 if other_unit == "day" else 1.0)
+            if (abs(total - target) > abs(other_total - target)
+                    and abs(other_total - target) <= target * 0.5):
+                unit, total = other_unit, other_total
+        candidates.append((unit, c, total))
+
+    if not candidates:
+        return (cols[0] if cols else None), "min", {}
+
+    # 优先「按分钟读」的列；没有的话就用天分数列
+    mins = [x for x in candidates if x[0] == "min"]
+    pool = mins or candidates
+    unit, col, total = max(pool, key=lambda x: x[2])
+    units = {c: u for u, c, _ in candidates}
+    if log:
+        log(f"    时长列取 {col}（单位：{'分钟' if unit == 'min' else '天分数×24'}，"
+            f"合计约 {total:.1f} 分钟）")
+    return col, unit, units
+
 
 
 def pace_from_speed(speed_kmh):
@@ -125,7 +302,7 @@ def _estimate_reps_duration(reps):
     return int((sec + 9) // 10) * 10
 
 
-def _parse_bodyweight_sheet(sheet_name, rows, header_idx):
+def _parse_bodyweight_sheet(course_name, rows, header_idx):
     """解析徒手课（bodyweight）工作表。
 
     徒手课表结构（与器械课不同）：
@@ -140,6 +317,8 @@ def _parse_bodyweight_sheet(sheet_name, rows, header_idx):
         同时写 intensity 三档标签（high/mid/low）供前端标签显示。
 
     时间轴：C 列有明确秒数则用它累加；否则（个数型动作）用 _estimate_reps_duration 估算。
+
+    参数 course_name 已由调用方算好（工作表名无意义时会换成文件名）。
     """
     from equipment_config import score_action, intensity_level
 
@@ -229,8 +408,8 @@ def _parse_bodyweight_sheet(sheet_name, rows, header_idx):
         cur_time += dur_sec
 
     course = {
-        "course_name": sheet_name.replace("\n", "").strip(),
-        "title": meta_title or sheet_name.strip(),
+        "course_name": course_name,
+        "title": meta_title or course_name,
         "equipment": "bodyweight",
         "duration": int(round(cur_time)),
         "segments": segments,
@@ -239,104 +418,115 @@ def _parse_bodyweight_sheet(sheet_name, rows, header_idx):
     return course
 
 
-def parse_sheet(sheet_name, rows):
-    """把单个 sheet 的原始行解析成课程 JSON dict。"""
+def parse_sheet(sheet_name, rows, source_name="", log=None, single_sheet=False):
+    """把单个 sheet 的原始行解析成课程 JSON dict。
+
+    参数：
+        sheet_name   : 工作表名（会成为 course_name，用于和达芬奇时间线名匹配）
+        rows         : parse_xlsx 出来的原始行
+        source_name  : 课件文件名/路径，仅用于兜底识别器械（新单课表的工作表常叫
+                       Sheet1，看不出器械，但文件名或所在文件夹名里有「爬楼机」之类）
+        log          : 可选日志函数
+        single_sheet : 这个 xlsx 是否只有一张工作表（见 effective_course_name）
+    """
     from equipment_config import detect_equipment
 
-    equipment = detect_equipment(sheet_name)
+    # 课程名：工作表名没意义（Sheet1）时退回用文件名
+    course_name = effective_course_name(sheet_name, source_name, single_sheet)
+
+    # 器械识别：工作表名前缀 -> 工作表名关键词 -> 文件名/路径关键词
+    equipment = detect_equipment(sheet_name, source_name)
     main_key, sub_key = EQUIP_METRICS.get(equipment, (None, None))
 
-    # 表头在第 3 行（第 1、2 行是课程元信息）。数据从第 4 行开始。
-    # 但行号不一定是连续的 1..N，这里按「有内容的行」解析。
-    # 找表头行：A 列 = "环节"（器械类）或 "动作名称"（徒手类）。
-    header_idx = None
-    for i, row in enumerate(rows):
-        a = (row.get("A") or "").strip()
-        if a in ("环节", "动作名称"):
-            header_idx = i
-            break
+    # 表头行不写死行号：老总表在第 3 行，新单课表在第 1 行
+    header_idx = find_header_row(rows)
     if header_idx is None:
         raise ValueError(f"工作表 {sheet_name} 无「环节」或「动作名称」表头，无法解析")
 
+    if log:
+        log(f"    器械={equipment} 表头在第 {header_idx + 1} 行")
+
     # 徒手课走独立解析分支（无器械指标列，强度靠动作类型判断）
     if equipment == "bodyweight":
-        return _parse_bodyweight_sheet(sheet_name, rows, header_idx)
+        return _parse_bodyweight_sheet(course_name, rows, header_idx)
 
-    # 课程元信息（第 1 行表头 + 第 2 行值）
+    colmap = build_colmap(rows[header_idx])
+    seg_col = (colmap.get("segment") or [None])[0]
+    act_col = (colmap.get("action") or [None])[0]
+    kw_col = (colmap.get("keyword") or [None])[0]
+    main_col = (colmap.get("main") or [None])[0]
+    sub_col = (colmap.get("sub") or [None])[0]
+    dist_col = (colmap.get("distance") or [None])[0]
+    # 所有「持续时间」列（老总表有 F/G 两列，格式不同），首选列排最前
+    dur_cols = colmap.get("duration") or []
+    dur_col, dur_unit, dur_units = choose_duration_col(
+        rows[header_idx + 1:], dur_cols, sheet_name, log=log)
+    # 去重且保持「首选列优先」的顺序
+    dur_cols_ordered = []
+    for c in [dur_col] + list(dur_cols):
+        if c and c not in dur_cols_ordered:
+            dur_cols_ordered.append(c)
+
+    # 课程元信息：老总表在表头前有两行（「课程主题」表头 + 值）
     meta = {}
-    if header_idx >= 1:
-        # 第 1 行是元信息表头，第 2 行是值
-        header_row = rows[0]
-        value_row = rows[1] if len(rows) > 1 else {}
-        for col, label in header_row.items():
-            label = (label or "").strip()
-            if label == "课程主题":
-                meta["course_name"] = (value_row.get(col) or "").strip()
-            elif label == "课程时长（min）":
-                meta["duration_min"] = (value_row.get(col) or "").strip()
+    if header_idx >= 2:
+        meta_header = rows[header_idx - 2]
+        meta_value = rows[header_idx - 1]
+        for col, label in meta_header.items():
+            label = str(label or "").strip()
+            if "课程主题" in label:
+                meta["course_name"] = str(meta_value.get(col) or "").strip()
+            elif "课程时长" in label:
+                meta["duration_min"] = str(meta_value.get(col) or "").strip()
 
-    # 数据行：header_idx 之后
     data_rows = rows[header_idx + 1:]
 
-    # 解析每个数据行
     segments = []   # {name, start, end}
     points = []     # {time, speed?, pace?, incline?, distance?, action?, keyword?}
     cur_time = 0.0
-    cur_segment = None  # 当前环节名（A 列空则继承）
-
-    def fcol(row, col):
-        v = row.get(col)
-        if v is None:
-            return None
-        v = str(v).strip()
-        return v if v != "" else None
-
-    def to_float(v):
-        try:
-            return float(v)
-        except (TypeError, ValueError):
-            return None
+    cur_segment = None  # 当前环节名（环节列空则继承）
 
     for row in data_rows:
-        g_val = fcol(row, "G")   # 时长（分钟）
-        f_val = fcol(row, "F")   # 时长（原始天序列）
-
-        # 跳过空行/图例行：F、G 都无值的行不是课程环节数据（是图例或空行）
-        if g_val is None and f_val is None:
+        # 跳过空行/图例行：所有「持续时间」列都没值的行不是课程数据。
+        # 逐列找值，并**跟着该列自己的单位**换算——老总表里有的行只填了 F 列
+        # （天分数）、G 列空着，沿用首选列的单位会把 0.104 天读成 0.104 分钟。
+        dur_raw = None
+        row_dur_unit = dur_unit
+        for c in dur_cols_ordered:
+            v = _cell_text(row, c)
+            if v is not None:
+                dur_raw = v
+                row_dur_unit = dur_units.get(c, dur_unit)
+                break
+        if dur_raw is None:
             continue
 
-        seg_name = fcol(row, "A")
-        action = fcol(row, "B")
-        keyword = fcol(row, "C")
-        d_val = fcol(row, "D")   # 主指标（速度/RPM/SPM）
-        e_val = fcol(row, "E")   # 副指标（坡度/阻力）
-        h_val = fcol(row, "H")   # 距离（米）
+        seg_name = _cell_text(row, seg_col)
+        action = _cell_text(row, act_col)
+        keyword = _cell_text(row, kw_col)
 
-        # 时长（分钟）：优先 G，其次 F×24
-        dur_min = to_float(g_val)
-        if dur_min is None and f_val is not None:
-            dur_min = to_float(f_val) * 24 if to_float(f_val) is not None else None
+        # 时长：按选中的列和单位换算成秒
+        dur_min = _to_float(dur_raw)
         if dur_min is None:
             dur_min = 0.0
-        # 时长秒：四舍五入到整数（健身课件时长均为 10 秒整数倍）
+        if row_dur_unit == "day":
+            dur_min *= 24.0
         dur_sec = round(dur_min * 60.0)
 
-        # 环节：A 非空则新环节
+        # 环节：环节列非空则新开一个环节，否则继承上一个
         if seg_name:
             if cur_segment:
-                # 结束上一个环节
                 cur_segment["end"] = int(round(cur_time))
-            cur_segment = {"name": seg_name, "start": int(round(cur_time)), "end": int(round(cur_time + dur_sec))}
+            cur_segment = {"name": seg_name, "start": int(round(cur_time)),
+                           "end": int(round(cur_time + dur_sec))}
             segments.append(cur_segment)
         elif cur_segment:
-            # 继承上一个环节，延长其结束时间
             cur_segment["end"] = int(round(cur_time + dur_sec))
 
-        # 生成 point
         point = {"time": int(round(cur_time))}
 
         # 主指标（速度/RPM/SPM）
-        d_num = to_float(d_val)
+        d_num = _to_float(_cell_text(row, main_col))
         if main_key and d_num is not None:
             point[main_key] = d_num
             if equipment == "treadmill":
@@ -345,16 +535,15 @@ def parse_sheet(sheet_name, rows):
                     point["pace"] = p
 
         # 副指标（坡度/阻力）
-        e_num = to_float(e_val)
+        e_num = _to_float(_cell_text(row, sub_col))
         if sub_key and e_num is not None:
             point[sub_key] = e_num
 
         # 距离（米 -> 公里）
-        h_num = to_float(h_val)
+        h_num = _to_float(_cell_text(row, dist_col))
         if h_num is not None and h_num > 0:
             point["distance"] = round(h_num / 1000.0, 3)
 
-        # 动作 / 关键词
         if action:
             point["action"] = action
         if keyword:
@@ -368,8 +557,10 @@ def parse_sheet(sheet_name, rows):
         cur_segment["end"] = int(round(cur_time))
 
     course = {
-        "course_name": sheet_name.replace("\n", "").strip(),  # 用工作表全名（含器械前缀），与达芬奇时间线名匹配
-        "title": meta.get("course_name") or sheet_name.strip(),  # 课程主题（友好显示名）
+        # course_name 用工作表全名（含器械前缀），与达芬奇时间线名匹配；
+        # 工作表名是 Sheet1 时已由 effective_course_name 换成文件名
+        "course_name": course_name,
+        "title": meta.get("course_name") or course_name,  # 课程主题（友好显示名）
         "equipment": equipment,
         "duration": int(round(cur_time)),
         "segments": segments,
@@ -398,6 +589,13 @@ def convert_file(xlsx_path, only_sheet=None, out_dir=None, log=print):
     if not xlsx_path or not os.path.exists(xlsx_path):
         raise ValueError(f"找不到课件文件：{xlsx_path}")
 
+    # Excel 打开文件时会生成 ~$ 开头的临时锁文件，误选到它只会报错，直接提示
+    if os.path.basename(xlsx_path).startswith("~$"):
+        raise ValueError(
+            f"这是 Excel 打开文件时产生的临时文件，不是课件本身：\n{xlsx_path}\n"
+            "请关闭 Excel 后选择不带 ~$ 前缀的那个文件。"
+        )
+
     if out_dir is None:
         out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
     os.makedirs(out_dir, exist_ok=True)
@@ -417,10 +615,14 @@ def convert_file(xlsx_path, only_sheet=None, out_dir=None, log=print):
     else:
         targets = all_sheets
 
+    single_sheet = (len(all_sheets) == 1)   # 新单课表：一节课一个 xlsx
     result = {"ok": 0, "skipped": [], "outputs": []}
     for sheet_name, rows in targets.items():
         try:
-            course = parse_sheet(sheet_name, rows)
+            # source_name 传完整路径：新单课表的工作表可能叫 Sheet1，
+            # 靠路径里的「爬楼机」「跑步机」等目录名兜底识别器械
+            course = parse_sheet(sheet_name, rows, source_name=xlsx_path, log=log,
+                                 single_sheet=single_sheet)
         except ValueError as e:
             log(f"跳过 {sheet_name}：{e}")
             result["skipped"].append((sheet_name, str(e)))
@@ -432,8 +634,9 @@ def convert_file(xlsx_path, only_sheet=None, out_dir=None, log=print):
             json.dump(course, f, ensure_ascii=False, indent=2)
         n_seg = len(course["segments"])
         n_pt = len(course["points"])
+        mm, ss = divmod(course["duration"], 60)
         log(f"  {sheet_name}  ->  {os.path.basename(out_path)}  "
-            f"({course['equipment']}, {course['duration']}s, {n_seg}环节, {n_pt}点)")
+            f"({course['equipment']}, {mm}分{ss:02d}秒, {n_seg}环节, {n_pt}点)")
         result["ok"] += 1
         result["outputs"].append(os.path.basename(out_path))
 

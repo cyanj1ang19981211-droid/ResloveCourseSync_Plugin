@@ -41,11 +41,12 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 # 注意：每个 key 的前缀列表互不为前缀（如「单车」不会被「单车内」之类误匹配，
 # 因为这种词不是合法器械名；这里按 key 列出顺序不重要）。
 EQUIPMENT_PREFIX_MAP = {
-    "treadmill":  ["跑步机"],
-    "bike":       ["动感单车", "室内单车", "单车"],
-    "rower":      ["划船机"],
-    "elliptical": ["椭圆机"],
-    "bodyweight": ["徒手"],
+    "treadmill":    ["跑步机"],
+    "stairclimber": ["爬楼机", "楼梯机", "登楼机"],
+    "bike":         ["动感单车", "室内单车", "单车"],
+    "rower":        ["划船机"],
+    "elliptical":   ["椭圆机"],
+    "bodyweight":   ["徒手"],
 }
 
 
@@ -330,6 +331,7 @@ class CourseManager:
 
         器械前缀映射（与 equipment_config.EQUIPMENTS 对齐）：
             跑步机  -> treadmill
+            爬楼机  -> stairclimber（兼容「楼梯机」「登楼机」）
             单车    -> bike（兼容「动感单车」「室内单车」等变体，但以「单车」为最短前缀）
             划船机  -> rower
             椭圆机  -> elliptical
@@ -560,7 +562,7 @@ CONVERT = ConvertJob()
 def build_curve(course: CourseData):
     """根据器械类型返回对应的曲线预览数据。
 
-    - 器械课（跑步机/单车/划船机/椭圆机）：从 points 里抽 speed/incline 等数值字段
+    - 器械课（跑步机/爬楼机/单车/划船机/椭圆机）：从 points 里抽 speed/incline 等数值字段
       画出连续折线。
     - 徒手课：没有速度/阻力等数值指标，但每个小动作有自己的强度（high/low）
       和个数（reps），用阶梯图能清晰看到「这节课哪里是高强度、哪里是休息」。
@@ -958,7 +960,7 @@ def resolve_loop():
                 segment_remaining=0.0,
                 next_step=None,
                 message=("未找到对应课程的强度数据（按器械+课程名匹配；如确认有对应 JSON，"
-                         "请检查时间线名是否含器械前缀，如'椭圆机-XXX'、'跑步机-XXX'）"
+                         "请检查时间线名是否含器械前缀，如'爬楼机-XXX'、'椭圆机-XXX'、'跑步机-XXX'）"
                          if tl_name else "已连接达芬奇，但当前没有打开的时间线"),
             )
         else:
