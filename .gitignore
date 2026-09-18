@@ -41,7 +41,9 @@ config.local.json
 # 没有管理员权限装 Python 的机器，可以把 Python 拷到 runtime\python\ 里
 runtime/
 
-# 探针诊断脚本（临时调试用，非正式功能）
+# 手动调试脚本（临时用，非正式功能）
+# 注意：probe_resolve.py 不在这里 —— 它是「检查环境.bat」正式依赖的
+# 连接实测探针，必须随包提交，不能忽略。
 probe_raw.py
 
 # 课程数据（核心业务数据，禁止提交/上传）

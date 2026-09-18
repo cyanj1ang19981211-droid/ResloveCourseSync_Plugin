@@ -95,6 +95,20 @@ def load_config():
 
 CONFIG = load_config()
 
+# 后端实例的自述信息，挂在 /state 和 /diag 里。
+#
+# 用途：排查「悬浮窗一直不同步」时，能一眼看出端口上跑的到底是**哪一个副本**。
+# 典型坑：换电脑/换版本后没关掉旧的悬浮窗，旧后端还在 8765 上活着，
+# 新双击的 start.bat 起的进程要么被清掉要么绑不上端口，用户看到的其实是
+# 另一个文件夹里的旧实例 —— 那样「改了设置却没变化」怎么都说不通。
+SERVER_META = {
+    "server_pid": os.getpid(),
+    "server_started_at": time.time(),
+    "server_code_dir": BASE_DIR,
+    "server_data_dir": os.path.abspath(CONFIG.get("data_dir") or ""),
+    "server_python": sys.executable,
+}
+
 
 # ---------- 前端存活检测（关掉悬浮窗后自动退出后端） ----------
 
@@ -1037,9 +1051,22 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"on": PIN.get()})
             return
 
+        if self.path == "/diag":
+            # 给「检查环境.bat」用的诊断口：和 /state 一样的内容，但**不算心跳**。
+            # 体检只是个一次性的旁观者，不能因为问了一句就把本该自动退出的
+            # 旧后端留住（那正是「端口被占」这类怪现象的来源）。
+            s = STATE.snapshot()
+            s.update(SERVER_META)
+            s["course_count"] = COURSES.count()
+            s["pin"] = PIN.get()
+            s.update(CONVERT.snapshot())
+            self._send_json(s)
+            return
+
         s = STATE.snapshot()
         if self.path in ("/", "/state"):
             LIVENESS.beat()   # 前端在拉数据 = 前端还活着
+            s.update(SERVER_META)
             # 悬浮窗右下角按钮的状态：课件数 > 0 显示「清除课件缓存」，
             # == 0 显示「选择课件」；转换进行中则临时显示「等待选择…」。
             s["course_count"] = COURSES.count()

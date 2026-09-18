@@ -300,7 +300,10 @@ def _preflight_message():
     """
     try:
         import env_check
-        fatal = env_check.fatal_problems(env_check.run_checks())
+        # include_link=False：跳过「达芬奇连接实测」。那一项要起子进程真连一次，
+        # 慢的时候要等好几秒，而启动前自检只关心「缺了什么致命的东西」。
+        # 真连不上的话插件本来也会自己等重连，用户想细查可以双击「检查环境.bat」。
+        fatal = env_check.fatal_problems(env_check.run_checks(include_link=False))
         if not fatal:
             return None
         lines = ["启动前的环境检查没有通过，插件现在跑不起来：", ""]

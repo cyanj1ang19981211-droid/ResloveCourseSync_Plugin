@@ -46,7 +46,11 @@ overlay.html  ── dark overlay window, real-time rendering
 
 ## Requirements
 
-- Windows 10 / 11 + DaVinci Resolve (Studio or Free, with Scripting API support).
+- Windows 10 / 11 + **DaVinci Resolve Studio** (paid edition).
+  ⚠️ **The free edition will not work**: since Resolve 19.1, external processes may only
+  drive the Scripting API on Studio (the free edition can only run scripts from the
+  in-app *Workspace → Scripts* menu). On the free edition `scriptapp("Resolve")` always
+  returns `None`, no matter what you configure.
 - Python **3.10 or 3.11** (required — DaVinci Resolve's `fusionscript` module only supports these versions; 3.12+ cannot talk to Resolve).
 - Microsoft Edge (the overlay uses `--app` mode; bundled with Windows 10/11).
 - No third-party Python packages required (pure standard library).
@@ -286,6 +290,18 @@ elliptical 3 / bodyweight 5).
 - **How do I know whether this machine can run it?** Double-click `检查环境.bat` for a full
   report (Python version, Resolve, Edge, course files, port) with fixes; it is also saved to
   `.runtime\环境体检报告.txt`.
+- **The overlay keeps saying "waiting for sync" even though I imported courses and built the
+  timeline**: double-click `检查环境.bat` again. It now *actually connects* to Resolve
+  (item **[3]**, real `scriptapp("Resolve")` call) and, if the backend is already running,
+  prints what that backend sees (item **[6]**: connected? which timeline? matched any course?).
+  The three usual causes, in order of likelihood:
+  1. **Free edition of Resolve** — see *Environment* above. Nothing can be configured around it.
+  2. **External scripting changed but Resolve not restarted** — set
+     *Preferences → System → General → External scripting using* to **Local**, then fully quit
+     and reopen Resolve.
+  3. **The timeline name does not match any course name** — the panel matches by name; rename the
+     timeline to the course name (with the equipment prefix it is safer, e.g.
+     `爬楼机-20min心肺间歇突破攀登`).
 
 **While running**
 
@@ -308,6 +324,7 @@ elliptical 3 / bodyweight 5).
 
 This project follows [Semantic Versioning](https://semver.org/).
 
+- **v0.5.0** — **"It won't connect / won't sync" is no longer guesswork:** the environment check gained item **[3] "live Resolve connection test"** (spawns a subprocess that really calls `scriptapp("Resolve")` and reports the current project / timeline / whether a course matches), the port check now asks the running backend what *it* sees, and the backend gained a `/diag` endpoint plus self-reported instance info (PID, start time, code dir, data dir) so a stale instance from *another folder* is obvious. Also documents the key prerequisite that **external scripting is Studio-only since Resolve 19.1** (the free edition cannot work).
 - **v0.4.0** — **No more guesswork on a fresh machine:** every `.bat` is now ASCII-only (fixes the garbled "*is not recognized as an internal or external command*" errors seen on another machine); added `检查环境.bat` + `env_check.py` environment check with a Chinese report; `start.bat` no longer fails silently (opens `SETUP-GUIDE.txt` when Python is missing, shows a Chinese message box on startup errors); portable Python support (`runtime\python\`) for machines without admin rights; added `check_bat.py` as a regression guard.
 - **v0.3.0** — Stair climber support (speed shown as a level + resistance/distance); `convert.bat` accepts multiple files at once; the parser now identifies columns by header text and handles the "one xlsx per lesson" layout.
 - **v0.2.0** — Graphical startup and conversion, screen-ratio overlay sizing, built-in always-on-top with a pin toggle, dual-role action button.

@@ -24,9 +24,17 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.request
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
+
+# 连接实测探针的启动标记（probe_resolve.py 里定义的同一串）
+_PROBE_MARK = "<<<PROBE>>>"
+
+# 连接实测最多等多久。达芬奇刚启动时第一次脚本连接可能要几秒，
+# 但再久就不正常了（真卡住的话宁可报「超时」也别让用户干等）。
+PROBE_TIMEOUT = 30
 
 # 检查结论的三个档位
 OK, WARN, BAD = "ok", "warn", "bad"
@@ -43,8 +51,18 @@ def _setup_stdout():
     """只处理「输出被重定向」的情况，写控制台时什么都不做。
 
     为什么不在控制台里自己按代码页重编码：Python 3.6 起在 Windows 上写控制台
-    走的是 WriteConsoleW（PEP 528），中文本来就不会乱码，而且和代码页无关。
-    我们要是自作主张按 cp936 重新编码，反而会把好端端的中文写坏。
+走的是 WriteConsoleW（PEP 528），中文本来就不会乱码，而且和代码页无关。
+我们要是自作主张按 cp936 重新编码，反而会把好端端的中文写坏。
+
+检查项一览（[3] 是唯一一项「真动手试一次」的）：
+    [1] Python 版本（达芬奇只认 3.10/3.11）
+    [2] 达芬奇本体：脚本模块、fusionscript.dll、进程、版本号
+    [3] 达芬奇连接实测：真跑一次 scriptapp("Resolve")，看当前工程/时间线/能否匹配课件
+    [4] 悬浮窗浏览器（Edge）
+    [5] 课件数据（data/ 下的 JSON 数量）
+    [6] 后端端口：被占时顺便把「上面那个后端看到了什么」问出来
+    [7] 项目文件完整性
+    [8] 便携版 Python
 
     被重定向到文件/管道时 Python 会退回按 locale 编码（中文 Windows 是 GBK），
     这里统一改成 utf-8，日志文件跨机器看不会乱码。
@@ -84,6 +102,64 @@ def _run_quiet(cmd, timeout=10):
         return ""
 
 
+def _http_json(url, timeout=2.5):
+    """GET 一个本地 HTTP 接口并解析 JSON；失败返回 None（不抛异常）。"""
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            return json.loads(r.read().decode("utf-8", "replace"))
+    except Exception:
+        return None
+
+
+def _resolve_running():
+    """达芬奇进程在不在跑。"""
+    return "Resolve.exe" in _run_quiet(["tasklist", "/FI", "IMAGENAME eq Resolve.exe", "/NH"])
+
+
+def _resolve_exe():
+    """找出达芬奇主程序的完整路径（fusionscript.dll 通常就躺在它旁边）。"""
+    try:
+        import resolve_connection as rc
+        lib = rc._find_fusionscript_lib()
+    except Exception:
+        lib = None
+    cands = []
+    if lib:
+        cands.append(os.path.join(os.path.dirname(lib), "Resolve.exe"))
+    cands += [
+        r"C:\Program Files\Blackmagic Design\DaVinci Resolve\Resolve.exe",
+        r"D:\Davinci\Resolve.exe",
+        r"E:\Davinci\Resolve.exe",
+    ]
+    for p in cands:
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+def _file_version(path):
+    """读 exe 的版本号（Windows 的版本资源）。读不到返回 ""。"""
+    try:
+        import ctypes
+        import ctypes.wintypes as w
+        fn = ctypes.windll.version
+        size = fn.GetFileVersionInfoSizeW(path, None)
+        if not size:
+            return ""
+        buf = ctypes.create_string_buffer(size)
+        if not fn.GetFileVersionInfoW(path, 0, size, buf):
+            return ""
+        for name in ("ProductVersion", "FileVersion"):
+            val = ctypes.c_wchar_p()
+            ln = w.UINT()
+            sub = "\\StringFileInfo\\040904b0\\" + name
+            if fn.VerQueryValueW(buf, sub, ctypes.byref(val), ctypes.byref(ln)) and ln.value:
+                return str(val.value)
+    except Exception:
+        pass
+    return ""
+
+
 # ---------------------------------------------------------------- 各项检查
 
 def check_python():
@@ -110,7 +186,11 @@ def check_python():
 
 
 def check_davinci():
-    """达芬奇本体：脚本模块、fusionscript.dll、进程是否在跑。"""
+    """达芬奇本体：脚本模块、fusionscript.dll、进程是否在跑、版本号。
+
+    注意：这一项**只看「东西在不在」**，不验「能不能连上」。连接实测是下一项，
+    两件事分开，一份报告才能看出到底是「没装」还是「装了但连不上」。
+    """
     lines = []
     level = OK
     advice = ""
@@ -136,14 +216,22 @@ def check_davinci():
 
     if lib:
         lines.append("运行库　：已找到 fusionscript.dll")
+        lines.append("          " + lib)
     else:
         if level != BAD:
             level = BAD
         lines.append("运行库　：未找到 fusionscript.dll")
 
+    # 达芬奇主程序在哪、什么版本（版本号很关键：19.1 之后外部脚本只给 Studio 用）
+    exe = _resolve_exe()
+    if exe:
+        ver = _file_version(exe)
+        lines.append("主程序　：" + exe)
+        if ver:
+            lines.append("版本　　：" + ver)
+
     # 进程是否在跑（没开达芬奇也能用插件，只是没数据）
-    out = _run_quiet(["tasklist", "/FI", "IMAGENAME eq Resolve.exe", "/NH"])
-    running = "Resolve.exe" in out
+    running = _resolve_running()
     lines.append("运行状态：" + ("达芬奇正在运行" if running else "达芬奇当前没开（插件会等它启动）"))
     if not running and level == OK:
         level = WARN
@@ -151,6 +239,133 @@ def check_davinci():
                   "打开达芬奇并载入时间线后会自动接上。")
 
     return dict(level=level, title="达芬奇（DaVinci Resolve）", lines=lines, advice=advice)
+
+
+# 连不上达芬奇时统一给这份排查清单（按可能性从高到低）
+_LINK_ADVICE = (
+    "1) 装的是免费版吗？—— 这是最常见的原因，先确认这一条。\n"
+    "   达芬奇 19.1 之后，「外部进程」调用脚本被限制为 Studio（付费版）专属：\n"
+    "   免费版只能在「工作区 -> 脚本」菜单里跑脚本，外部程序一律连不上，\n"
+    "   改任何设置都没用。确认办法：打开达芬奇 -> 菜单「帮助 / Help」->「关于」，\n"
+    "   或者直接看窗口标题栏，写着 Studio 才是付费版。\n"
+    "   如果是免费版：这个插件（以及所有外部脚本工具）都用不了，\n"
+    "   要升级到 Studio 才可以。\n"
+    "\n"
+    "2) 改完设置要重启达芬奇。\n"
+    "   偏好设置 -> 系统 -> 常规 -> 「外部脚本使用 / External scripting using」\n"
+    "   设为「本地 / Local」，然后**完全退出达芬奇再重新打开**（不重启常常不生效）。\n"
+    "\n"
+    "3) 达芬奇里要先打开一个工程，并且停在「剪辑 / Edit」页（有时间线）。\n"
+    "\n"
+    "4) 安全软件拦截。把插件所在文件夹加进杀毒软件白名单，或临时关掉\n"
+    "   「脚本防护 / 勒索防护」再试一次。\n"
+    "\n"
+    "5) 确认插件用的是本机的 Python 3.10/3.11（本报告第 1 项已通过就说明没问题）。\n"
+)
+
+
+def check_resolve_link():
+    """真连一次达芬奇 —— 体检里唯一能回答「到底连没连上」的一项。
+
+    为什么必须有这一项：[2] 只看文件在不在、进程跑没跑。文件都在、设置也对，
+    却始终连不上（免费版限制、改完设置没重启达芬奇、没打开工程）时，以前
+    整份报告全是「通过」，用户根本不知道问题在哪 —— 表现就是
+    「悬浮窗一直显示等待/未同步」。
+
+    实现在子进程里跑 probe_resolve.py：fusionscript 是原生库，连不上时可能
+    直接把进程打崩（access violation），Python 层拦不住，隔一层子进程才安全。
+    """
+    title = "达芬奇连接实测"
+    probe = os.path.join(BASE_DIR, "probe_resolve.py")
+    if not os.path.isfile(probe):
+        return dict(level=WARN, title=title,
+                    lines=["找不到 probe_resolve.py，跳过实测",
+                           "（这份文件是检查用的探针，缺失说明解压包不完整）"],
+                    advice="请重新完整解压一遍下载的压缩包。")
+
+    running = _resolve_running()
+    try:
+        p = subprocess.run([sys.executable, probe], capture_output=True, text=True,
+                           errors="replace", timeout=PROBE_TIMEOUT,
+                           creationflags=0x08000000)
+        out = (p.stdout or "") + "\n" + (p.stderr or "")
+    except subprocess.TimeoutExpired:
+        return dict(level=WARN, title=title,
+                    lines=["实测超时：%d 秒都没有返回" % PROBE_TIMEOUT,
+                           "达芬奇可能正忙（正在导出/渲染），或脚本接口卡住了。"],
+                    advice="等达芬奇空下来再跑一次体检。如果每次都超时，按下面的清单排查。")
+    except Exception as e:
+        return dict(level=WARN, title=title,
+                    lines=["没能启动探针：%s: %s" % (type(e).__name__, e)], advice="")
+
+    data = None
+    for line in out.splitlines():
+        if line.startswith(_PROBE_MARK):
+            try:
+                data = json.loads(line[len(_PROBE_MARK):])
+            except Exception:
+                data = None
+    if not isinstance(data, dict):
+        # 探针被 fusionscript 原生崩溃带走了 —— 这时候 stdout 里什么都没有
+        lines = ["探针进程异常退出，没有返回任何结果",
+                 "（达芬奇没开、或 Python 版本与 fusionscript 不匹配时会出现这种情况）"]
+        lines += ["          " + l.strip()[-100:]
+                  for l in [x for x in out.splitlines() if x.strip()][-3:]]
+        return dict(level=(BAD if running else WARN), title=title, lines=lines,
+                    advice=_LINK_ADVICE)
+
+    # ---- 连不上 ----
+    if not data.get("connected"):
+        lines = ["连接结果：失败"]
+        err = str(data.get("error") or "").strip()
+        if err:
+            lines.append("原因　　：" + err[:150])
+        lines.append("达芬奇　：" + ("正在运行（所以不是「没开软件」的问题）"
+                                    if running else "没有在运行"))
+        if not running:
+            return dict(level=WARN, title=title, lines=lines,
+                        advice=("达芬奇现在没开，所以连不上 —— 这不影响启动插件。\n"
+                                "要测连接的话：先打开达芬奇、新建或载入一个工程，再跑一次体检。"))
+        return dict(level=BAD, title=title, lines=lines, advice=_LINK_ADVICE)
+
+    # ---- 连上了 ----
+    lines = ["连接结果：成功"]
+    product = str(data.get("product") or "")
+    version = str(data.get("version") or "")
+    if product or version:
+        lines.append("达芬奇　：" + (product or "DaVinci Resolve") + (" " + version if version else ""))
+    lines.append("当前工程：" + (str(data.get("project") or "") or "（没有打开的工程）"))
+    tl = str(data.get("timeline") or "")
+    lines.append("当前时间线：" + (tl or "（没有打开/选中的时间线）"))
+    if data.get("timecode"):
+        lines.append("播放头　：" + str(data["timecode"]))
+
+    total = data.get("course_total")
+    if isinstance(total, int):
+        lines.append("已导入课件：%d 份" % total)
+    match = str(data.get("match") or "")
+    lines.append("课程匹配：" + ("成功 -> " + match if match else "没匹配上"))
+
+    if not tl:
+        return dict(
+            level=WARN, title=title, lines=lines,
+            advice=("插件能连上达芬奇，但达芬奇现在没有「当前时间线」。\n"
+                    "请在达芬奇的「剪辑 / Edit」页里打开一条时间线，再跑一次体检。"))
+
+    if not match:
+        names = [str(n) for n in (data.get("courses") or [])]
+        advice = ("插件是按「时间线名字」去找课件的 —— 名字对不上就没有数据。\n"
+                  "空格、连字符、大小写会自动忽略，但字必须对得上。\n\n"
+                  "当前时间线叫：%s\n" % tl)
+        if names:
+            advice += ("data/ 里现有的课件名（前几个）：\n    " + "\n    ".join(names) + "\n")
+            if isinstance(total, int) and total > len(names):
+                advice += "    …（共 %d 份）\n" % total
+        advice += ("\n办法：在达芬奇的时间线管理器里双击改名，改成和课件名一致即可。\n"
+                   "带器械前缀更保险，例如「爬楼机-20min心肺间歇突破攀登」。")
+        return dict(level=WARN, title=title, lines=lines, advice=advice)
+
+    return dict(level=OK, title=title, lines=lines, advice="")
 
 
 def check_edge():
@@ -194,43 +409,105 @@ def check_courses():
                 "转完不用重启插件，它会自己重新读取。"))
 
 
-def check_port():
-    """后端监听端口是否被别的程序占着。"""
+def _read_port():
     port = 8765
     try:
         with open(os.path.join(BASE_DIR, "config.json"), "r", encoding="utf-8") as f:
             port = int(json.load(f).get("port") or port)
     except Exception:
         pass
+    return port
 
-    busy = False
+
+def _port_busy(port):
     try:
         s = socket.socket()
         s.settimeout(0.4)
         try:
             s.connect(("127.0.0.1", port))
-            busy = True
+            return True
         except OSError:
-            busy = False
+            return False
         finally:
             s.close()
     except Exception:
-        pass
+        return False
 
-    if busy:
+
+def check_port():
+    """后端端口：被占时顺便把「上面那个后端到底看到了什么」问出来。
+
+    这是排查「悬浮窗一直不同步」最快的一步：后端自己在 /diag 里就把
+    「连没连上达芬奇、当前时间线是哪条、有没有匹配到课件、读的是哪个 data 目录」
+    全都说了。用户只要双击一次体检，就能分清到底是插件的锅还是时间线名的锅。
+
+    用 /diag 而不是 /state：/state 会被后端当成「前端心跳」，体检去问一下
+    就可能让一个本该自动退出的旧后端继续赖着不走。
+    """
+    port = _read_port()
+    if not _port_busy(port):
+        return dict(level=OK, title="后端端口 %d" % port, lines=["端口空闲"], advice="")
+
+    info = _http_json("http://127.0.0.1:%d/diag" % port)
+    if info is None:
+        info = _http_json("http://127.0.0.1:%d/state" % port)   # 兼容旧版后端
+
+    if not isinstance(info, dict):
         return dict(
             level=WARN, title="后端端口 %d" % port,
-            lines=["端口已被占用"],
-            advice=("如果插件此刻正在运行，这是正常的（说明旧实例还开着）。\n"
-                    "如果确认没开插件却占着端口，关掉占用它的程序，或改 config.json 里的端口。"))
-    return dict(level=OK, title="后端端口 %d" % port, lines=["端口空闲"], advice="")
+            lines=["端口被占用，但上面的程序不回应本插件的诊断接口",
+                   "（多半是别的软件占了这个端口，插件后端没跑起来）"],
+            advice=("把占用这个端口的程序关掉，或者把 config.json 里的 port\n"
+                    "改成别的（比如 8766），再双击 start.bat。"))
+
+    lines = ["端口上正在运行插件后端（正常，说明插件正开着）", "",
+             "它自己报告的状态：",
+             "  连接达芬奇：" + ("已连接" if info.get("connected") else "未连接"),
+             "  当前时间线：" + (str(info.get("timeline_name") or "") or "（没读到）"),
+             "  匹配到课件：" + (("是 -> " + str(info.get("course_name") or ""))
+                                if info.get("course_loaded") else "否"),
+             "  课件数量　：" + str(info.get("course_count")),
+             "  读取目录　：" + str(info.get("server_data_dir") or "（未上报）")]
+    if info.get("message"):
+        lines.append("  悬浮窗那行小字：" + str(info["message"]))
+
+    level, advice = OK, ""
+
+    # 端口上的后端竟然是别的文件夹里的 —— 这种情况最坑：改代码/换版本都像没生效
+    code_dir = str(info.get("server_code_dir") or "")
+    if code_dir and os.path.normcase(os.path.normpath(code_dir)) != \
+            os.path.normcase(os.path.normpath(BASE_DIR)):
+        level = WARN
+        advice = ("端口上的后端来自另一个文件夹：\n    %s\n"
+                  "而你现在这份是：\n    %s\n"
+                  "先关掉悬浮窗（或结束对应的 python 进程），再双击本目录的 start.bat。\n"
+                  "否则你看到的永远是那个旧实例的画面。" % (code_dir, BASE_DIR))
+
+    if not info.get("connected"):
+        if level == OK:
+            level = WARN
+            advice = ("这个后端还没连上达芬奇 —— 请看上面【达芬奇连接实测】那一项，\n"
+                      "按里面的排查清单处理。")
+    elif not info.get("course_loaded"):
+        if level == OK:
+            level = WARN
+            tl = str(info.get("timeline_name") or "")
+            advice = ("后端连上达芬奇了，但当前时间线没有匹配到课件。\n"
+                      "当前时间线：%s\n"
+                      "把时间线名改成和课件名一致（带器械前缀更稳，例如\n"
+                      "「爬楼机-20min心肺间歇突破攀登」），插件会自动接上。" % (tl or "（空）"))
+    elif level == OK:
+        lines.append("")
+        lines.append("=> 同步链路是通的，悬浮窗应该正常显示。")
+
+    return dict(level=level, title="后端端口 %d" % port, lines=lines, advice=advice)
 
 
 def check_files():
     """必需项目文件是否齐全（防止只拷贝了一部分文件）。"""
     need = ["server.py", "launcher.py", "overlay.py", "course_data.py",
             "equipment_config.py", "resolve_connection.py", "xlsx_to_json.py",
-            "convert_course.py", "config.json",
+            "convert_course.py", "probe_resolve.py", "config.json",
             os.path.join("frontend", "overlay.html")]
     missing = [f for f in need if not os.path.exists(os.path.join(BASE_DIR, f))]
     if missing:
@@ -257,16 +534,22 @@ def check_portable_python():
         advice="")
 
 
-CHECKS = (check_python, check_davinci, check_edge, check_courses,
-          check_port, check_files, check_portable_python)
-
-
 # ---------------------------------------------------------------- 报告渲染
 
-def run_checks():
-    """跑全部检查，返回结果列表。"""
+def run_checks(include_link=True):
+    """跑全部检查，返回结果列表。
+
+    include_link=False 用来跳过「达芬奇连接实测」：那一项要起子进程真连一次，
+    慢的时候要几秒（极端情况等满 30 秒）。launcher.py 启动前的自检只想知道
+    「有没有致命问题」，没必要每次都实测一遍，所以它会传 False。
+    """
+    checks = [check_python, check_davinci]
+    if include_link:
+        checks.append(check_resolve_link)
+    checks += [check_edge, check_courses, check_port, check_files, check_portable_python]
+
     results = []
-    for fn in CHECKS:
+    for fn in checks:
         try:
             results.append(fn())
         except Exception as e:      # 单项炸了也要继续
