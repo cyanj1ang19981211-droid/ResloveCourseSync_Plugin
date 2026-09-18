@@ -55,7 +55,15 @@ EQUIPMENT_PREFIX_MAP = {
 def load_config():
     cfg_path = os.path.join(BASE_DIR, "config.json")
     default = {
-        "resolve_script_path": None,        # 达芬奇 scripting 模块路径（留空则自动探测）
+        # 达芬奇路径。三项都留空 = 全自动探测（推荐）。
+        # 只有当自动探测失败（比如达芬奇装在很偏的位置）时才需要手动填：
+        #   resolve_install_dir  —— 达芬奇安装目录（里面同时有 Resolve.exe 和
+        #                           fusionscript.dll），例："D:\\软件\\达芬奇"
+        #   resolve_script_path  —— …\\Support\\Developer\\Scripting\\Modules
+        #   resolve_script_lib   —— fusionscript.dll 的完整路径（最精确）
+        "resolve_install_dir": None,
+        "resolve_script_path": None,
+        "resolve_script_lib": None,
         "data_dir": os.path.join(BASE_DIR, "data"),
         "port": 8765,
         "poll_interval": 0.1,               # 轮询间隔（秒）

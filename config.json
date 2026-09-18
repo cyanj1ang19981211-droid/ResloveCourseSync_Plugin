@@ -1,4 +1,5 @@
 {
+  "resolve_install_dir": null,
   "resolve_script_path": null,
   "resolve_script_lib": null,
   "data_dir": "data",

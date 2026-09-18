@@ -54,10 +54,32 @@ def probe():
     try:
         import resolve_connection as rc
 
+        # ---- 0) 先把「达芬奇的路径是怎么找到的」摊开 ----
+        # 这一步不改任何东西，纯记录：对方机器上两个文件分别在哪儿、找过哪些
+        # 目录、有没有用上缓存。连不上时这几行就是最关键的线索 ——
+        # 官方那份 DaVinciResolveScript.py 只认
+        # "C:\Program Files\Blackmagic Design\DaVinci Resolve\fusionscript.dll"
+        # 这个写死的路径，装在别的盘就必然连不上。
+        out["stage"] = "locate"
+        try:
+            d = rc.diagnose()
+            out["python"] = sys.executable
+            out["module_dir"] = d.get("module_dir") or ""
+            out["lib"] = d.get("lib") or ""
+            out["install_dir"] = d.get("install_dir") or ""
+            out["exe"] = d.get("exe") or ""
+            out["exe_version"] = d.get("exe_version") or ""
+            out["registered_version"] = d.get("registered_version") or ""
+            out["candidate_total"] = d.get("candidate_total") or 0
+            out["search_report"] = (d.get("search_report") or [])[:12]
+            out["cached"] = bool(d.get("cached"))
+            out["cache_file"] = d.get("cache_file") or ""
+        except Exception as e:
+            out["locate_error"] = "%s: %s" % (type(e).__name__, e)
+
         conn = rc.ResolveConnection()
-        out["python"] = sys.executable
-        out["module_dir"] = conn.module_path or ""
-        out["lib"] = conn.lib_path or ""
+        out["module_dir"] = conn.module_path or out.get("module_dir", "")
+        out["lib"] = conn.lib_path or out.get("lib", "")
 
         # ---- 1) 真连一次（这一步失败就是「悬浮窗一直不同步」最常见的原因）----
         out["stage"] = "connect"
@@ -133,8 +155,19 @@ def human(data):
     print("达芬奇连接实测")
     print("=" * 60)
     print("Python      :", data.get("python", ""))
-    print("脚本模块目录:", data.get("module_dir", ""))
-    print("fusionscript:", data.get("lib", ""))
+    print("脚本模块目录:", data.get("module_dir", "") or "(没找到)")
+    print("fusionscript:", data.get("lib", "") or "(没找到)")
+    if data.get("install_dir"):
+        print("安装目录    :", data["install_dir"])
+    if data.get("exe"):
+        print("达芬奇主程序:", data["exe"],
+              ("v" + str(data["exe_version"])) if data.get("exe_version") else "")
+    if data.get("registered_version"):
+        print("注册表版本  :", data["registered_version"])
+    if data.get("search_report"):
+        print("找过这些地方（[有] = 该目录里确实有这个文件）:")
+        for l in data["search_report"]:
+            print("   ", l.strip())
     print("-" * 60)
     if not data.get("connected"):
         print("连接结果: 失败")

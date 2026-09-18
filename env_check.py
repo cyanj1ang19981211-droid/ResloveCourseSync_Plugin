@@ -117,47 +117,25 @@ def _resolve_running():
 
 
 def _resolve_exe():
-    """找出达芬奇主程序的完整路径（fusionscript.dll 通常就躺在它旁边）。"""
+    """找出达芬奇主程序的完整路径。
+
+    交给 resolve_connection 统一处理（进程 → 快捷方式 → 安装目录 → 常见位置），
+    这里不再写死 C:/D:/E: 那几个目录 —— 每个人的安装位置都不一样。
+    """
     try:
         import resolve_connection as rc
-        lib = rc._find_fusionscript_lib()
+        return rc.find_resolve_exe() or None
     except Exception:
-        lib = None
-    cands = []
-    if lib:
-        cands.append(os.path.join(os.path.dirname(lib), "Resolve.exe"))
-    cands += [
-        r"C:\Program Files\Blackmagic Design\DaVinci Resolve\Resolve.exe",
-        r"D:\Davinci\Resolve.exe",
-        r"E:\Davinci\Resolve.exe",
-    ]
-    for p in cands:
-        if os.path.isfile(p):
-            return p
-    return None
+        return None
 
 
 def _file_version(path):
     """读 exe 的版本号（Windows 的版本资源）。读不到返回 ""。"""
     try:
-        import ctypes
-        import ctypes.wintypes as w
-        fn = ctypes.windll.version
-        size = fn.GetFileVersionInfoSizeW(path, None)
-        if not size:
-            return ""
-        buf = ctypes.create_string_buffer(size)
-        if not fn.GetFileVersionInfoW(path, 0, size, buf):
-            return ""
-        for name in ("ProductVersion", "FileVersion"):
-            val = ctypes.c_wchar_p()
-            ln = w.UINT()
-            sub = "\\StringFileInfo\\040904b0\\" + name
-            if fn.VerQueryValueW(buf, sub, ctypes.byref(val), ctypes.byref(ln)) and ln.value:
-                return str(val.value)
+        import resolve_connection as rc
+        return rc._file_version(path)
     except Exception:
-        pass
-    return ""
+        return ""
 
 
 # ---------------------------------------------------------------- 各项检查
@@ -185,8 +163,27 @@ def check_python():
                 advice="Python 版本过低（需要 3.10 或 3.11），请升级。")
 
 
+# 找不到 fusionscript.dll 时统一给的说明（这个文件的位置每个人都不一样）
+_LIB_NOT_FOUND_ADVICE = (
+    "插件要用达芬奇安装目录里的 fusionscript.dll（原生脚本库），但在这台电脑上\n"
+    "没找到。这个文件的位置「每个人都不一样」——\n"
+    "有人是 C:\\Program Files\\Blackmagic Design\\DaVinci Resolve，\n"
+    "有人是 D:\\软件\\达芬奇\\DaVinci Resolve，有人干脆是 E:\\Davinci。\n"
+    "插件已经按这个顺序找过一遍了：正在运行的达芬奇 → 开始菜单/桌面快捷方式 →\n"
+    "各磁盘的常见软件目录 → 限定深度的全盘搜索。\n"
+    "\n"
+    "怎么办（从上往下试）：\n"
+    "1) 先把达芬奇打开（进程在跑的时候最好找），再双击一次 检查环境.bat。\n"
+    "2) 还找不到就手动指定。找法：开始菜单里右键「DaVinci Resolve」→ 更多 →\n"
+    "   打开文件位置，看看它落在哪个目录；然后在 config.json 里加一行：\n"
+    '       "resolve_install_dir": "那个目录的完整路径"\n'
+    "   （该目录里应该同时有 Resolve.exe 和 fusionscript.dll）\n"
+    "3) 如果达芬奇根本没装，先装达芬奇。"
+)
+
+
 def check_davinci():
-    """达芬奇本体：脚本模块、fusionscript.dll、进程是否在跑、版本号。
+    """达芬奇本体：两个关键文件在不在、在哪、进程跑没跑、版本号。
 
     注意：这一项**只看「东西在不在」**，不验「能不能连上」。连接实测是下一项，
     两件事分开，一份报告才能看出到底是「没装」还是「装了但连不上」。
@@ -197,8 +194,9 @@ def check_davinci():
 
     try:
         import resolve_connection as rc
-        mod_dir = rc._find_module_dir()
-        lib = rc._find_fusionscript_lib()
+        d = rc.diagnose()
+        mod_dir = d.get("module_dir") or ""
+        lib = d.get("lib") or ""
     except Exception as e:
         return dict(level=WARN, title="达芬奇（DaVinci Resolve）",
                     lines=["检查时出错：%s: %s" % (type(e).__name__, e)],
@@ -210,9 +208,18 @@ def check_davinci():
     else:
         level = BAD
         lines.append("脚本模块：未找到 DaVinciResolveScript.py")
-        advice = ("没有找到达芬奇的脚本接口文件，通常是没装达芬奇造成的。\n"
-                  "装好达芬奇后，还要在达芬奇里开启脚本功能：\n"
-                  "偏好设置 -> 系统 -> 常规 -> External scripting using 设为 Local。")
+        lines.append("          找过这些目录（[有] = 该目录里确实有这个文件）：")
+        for c in (d.get("module_candidates") or [])[:8]:
+            mark = "有" if os.path.isfile(os.path.join(c, "DaVinciResolveScript.py")) else "无"
+            lines.append("          [%s] %s" % (mark, c))
+        advice = ("没有找到达芬奇的脚本接口文件（DaVinciResolveScript.py）。\n"
+                  "它通常在这里：<系统盘>\\ProgramData\\Blackmagic Design\\DaVinci Resolve\\\n"
+                  "Support\\Developer\\Scripting\\Modules\n"
+                  "如果那里确实没有，多半是达芬奇没装好，或者装完被清理软件删过。\n"
+                  "重装一次达芬奇即可；装好之后别忘了在达芬奇里开启脚本功能：\n"
+                  "偏好设置 -> 系统 -> 常规 -> External scripting using 设为 Local。\n"
+                  "也可以手动指定：config.json 里加一行\n"
+                  '    "resolve_script_path": "…\\Support\\Developer\\Scripting\\Modules"')
 
     if lib:
         lines.append("运行库　：已找到 fusionscript.dll")
@@ -221,6 +228,29 @@ def check_davinci():
         if level != BAD:
             level = BAD
         lines.append("运行库　：未找到 fusionscript.dll")
+        lines.append("          找过这些地方（[有] = 该目录里确实有这个文件）：")
+        for l in (d.get("search_report") or [])[:10]:
+            lines.append("          " + l.strip())
+        advice = _LIB_NOT_FOUND_ADVICE
+
+    # 磁盘上可能有不止一份达芬奇（升级后旧目录没删干净是常事）。
+    # 旧版残留会让插件挑错版本，连不上或者连上就崩，所以明确报出来。
+    installs = d.get("installs") or []
+    if len(installs) > 1:
+        lines.append("")
+        lines.append("磁盘上发现有 %d 份达芬奇安装（插件用标了 (*) 的那份）：" % len(installs))
+        used = os.path.normcase(os.path.dirname(lib)) if lib else ""
+        for p in installs[:6]:
+            d = os.path.dirname(p)
+            mark = "(*)" if used and os.path.normcase(d) == used else "   "
+            v = _file_version(os.path.join(d, "Resolve.exe"))
+            lines.append("          %s %s%s" % (mark, d, ("  v" + v) if v else ""))
+        if level == OK:
+            level = WARN
+            advice = ("这台电脑上有不止一份达芬奇。插件已经按「正在运行的那份 →\n"
+                      "注册表记录的版本 → 目录里有没有 Resolve.exe」的顺序挑了标 (*) 的\n"
+                      "那一份。如果确认用错了，把不用的旧目录删掉/改名，或者干脆把达芬奇\n"
+                      "重装一次，问题即可消失。")
 
     # 达芬奇主程序在哪、什么版本（版本号很关键：19.1 之后外部脚本只给 Studio 用）
     exe = _resolve_exe()
@@ -253,14 +283,15 @@ _LINK_ADVICE = (
     "\n"
     "2) 改完设置要重启达芬奇。\n"
     "   偏好设置 -> 系统 -> 常规 -> 「外部脚本使用 / External scripting using」\n"
-    "   设为「本地 / Local」，然后**完全退出达芬奇再重新打开**（不重启常常不生效）。\n"
+    "   设为「本地 / Local」，然后「完全退出达芬奇再重新打开」（不重启常常不生效）。\n"
     "\n"
     "3) 达芬奇里要先打开一个工程，并且停在「剪辑 / Edit」页（有时间线）。\n"
     "\n"
     "4) 安全软件拦截。把插件所在文件夹加进杀毒软件白名单，或临时关掉\n"
     "   「脚本防护 / 勒索防护」再试一次。\n"
     "\n"
-    "5) 确认插件用的是本机的 Python 3.10/3.11（本报告第 1 项已通过就说明没问题）。\n"
+    "5) 确认插件用的是本机的 Python 3.10/3.11（本报告里「Python 解释器」\n"
+    "   那一项通过就说明没问题）。\n"
 )
 
 
@@ -319,9 +350,18 @@ def check_resolve_link():
         lines = ["连接结果：失败"]
         err = str(data.get("error") or "").strip()
         if err:
-            lines.append("原因　　：" + err[:150])
+            lines.append("原因　　：" + err.splitlines()[0][:150])
+        lines.append("脚本模块：" + (str(data.get("module_dir") or "") or "（没找到）"))
+        lines.append("运行库　：" + (str(data.get("lib") or "") or "（没找到）"))
         lines.append("达芬奇　：" + ("正在运行（所以不是「没开软件」的问题）"
                                     if running else "没有在运行"))
+
+        # 两个关键文件没找到 —— 这跟「免费版/没设外部脚本」是完全不同的病，
+        # 药方也不一样，所以分开给建议（以前只会让人去查版别，白折腾）。
+        if not data.get("lib") or not data.get("module_dir"):
+            return dict(level=BAD, title=title, lines=lines,
+                        advice=_LIB_NOT_FOUND_ADVICE)
+
         if not running:
             return dict(level=WARN, title=title, lines=lines,
                         advice=("达芬奇现在没开，所以连不上 —— 这不影响启动插件。\n"

@@ -154,7 +154,9 @@ python overlay.py    # 启动悬浮窗
 
 | 键 | 说明 | 默认 |
 |---|---|---|
+| `resolve_install_dir` | 达芬奇安装目录（里面有 `Resolve.exe` 和 `fusionscript.dll`），**留空自动探测** | `null` |
 | `resolve_script_path` | 达芬奇 scripting 模块路径（留空自动探测） | `null` |
+| `resolve_script_lib` | `fusionscript.dll` 完整路径（留空自动探测；上面两项都不行时才需要） | `null` |
 | `data_dir` | 课程数据目录 | `data` |
 | `port` | 本地服务端口 | `8765` |
 | `poll_interval` | 轮询间隔（秒） | `0.1` |
@@ -166,11 +168,27 @@ python overlay.py    # 启动悬浮窗
 
 > 端口也可以用环境变量 `RESOLVE_SYNC_PORT` 临时覆盖（跑第二个实例或自动化测试时有用）。
 
-达芬奇 scripting 模块常见位置：
+达芬奇要靠两个文件才能被外部脚本连上，而且**这两个文件的位置每个人都不一样**：
+
+1. **scripting 模块**（官方封装）：一般在系统盘的
+   `C:\ProgramData\Blackmagic Design\DaVinci Resolve\Support\Developer\Scripting\Modules`
+2. **`fusionscript.dll`**（原生库）：躺在**达芬奇自己的安装目录**里。
+   官方那份模块只认写死的 `C:\Program Files\Blackmagic Design\DaVinci Resolve\`，
+   所以装在别的盘（`D:\软件\达芬奇`、`E:\Davinci` 之类）时外面是连不上的。
+
+插件会自动找，顺序是：正在运行的达芬奇 → Windows 安装器登记的安装目录 →
+开始菜单/桌面快捷方式 → 各磁盘常见目录 → 限定深度的全盘搜索；
+找到一次就记进 `.runtime/resolve_paths.json`，以后秒开。
+磁盘上有多份达芬奇（升级后旧目录没删干净）时，会按注册表记录的版本号挑
+「正在用的那一份」。
+
+实在找不到（`检查环境.bat` 的【2】会列出它找过哪些目录），再从上面三个键里挑一个填：
+
+```json
+{ "resolve_install_dir": "D:\\软件\\达芬奇" }
 ```
-C:\ProgramData\Blackmagic Design\DaVinci Resolve\Support\Developer\Scripting\Modules
-```
-若自动探测失败，把它填进 `resolve_script_path`。
+
+怎么查这个目录：开始菜单里右键「DaVinci Resolve」→ 更多 → 打开文件位置。
 
 ## 数据格式
 
@@ -292,6 +310,15 @@ C:\ProgramData\Blackmagic Design\DaVinci Resolve\Support\Developer\Scripting\Mod
   诊断接口并上报自身实例信息（PID/启动时间/代码目录/data 目录），可一眼识别
   「端口上跑的是另一个文件夹里的旧实例」；补充「达芬奇 19.1 起外部脚本仅 Studio 支持」
   这一关键前提（**免费版用不了**）。
+- **v0.4.1** —— **达芬奇装在哪都能连上**：以前只认识几个写死的安装目录，而官方那份
+  `DaVinciResolveScript.py` 更是只认 `C:\Program Files\Blackmagic Design\DaVinci Resolve\`
+  里的 `fusionscript.dll`——别人把达芬奇装在 `D:\软件\达芬奇`、`E:\Davinci` 就连不上。
+  现在插件按「正在运行的达芬奇 → Windows 安装器登记的安装目录 → 开始菜单/桌面快捷方式
+  → 各磁盘常见目录 → 限定深度的全盘搜索」逐级查找，找到就记进
+  `.runtime/resolve_paths.json`（以后秒开）；磁盘上留着旧版达芬奇时按注册表版本挑对的那份；
+  体检报告会列出「找过哪些目录、磁盘上有几份安装」；Edge 也改成从注册表找，不再写死 C 盘。
+  另外修掉两个连带问题：「先开插件、后开达芬奇」时如果启动那刻没找到 dll 会永远卡住；
+  以及未找到时只丢一句「未找到」、看不到究竟找过哪儿。
 - **v0.4.0** —— **换机器/首次使用不再靠猜**：所有 `.bat` 改为纯 ASCII（修掉换机器后
   「不是内部或外部命令」的乱码报错）；新增 `检查环境.bat` + `env_check.py` 中文环境体检；
   `start.bat` 不再静默失败（找不到 Python 自动打开 `SETUP-GUIDE.txt`，启动异常弹中文提示框）；

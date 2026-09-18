@@ -47,24 +47,57 @@ OVERLAY_TITLE = "课程强度同步"
 # Always On Top）。config.json 里可用 "always_on_top": false 关掉。
 ALWAYS_ON_TOP = True
 
-# 找到 Edge 浏览器
-EDGE_PATHS = [
-    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-    r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-]
+# 找 Edge 浏览器。别只认 C 盘默认位置 —— 用户的 Program Files 有可能在别的盘，
+# 也可能把 Edge 装到自定义目录，所以按「注册表 → 环境变量 → 常见路径」的顺序找。
+_EDGE_REL = ("Microsoft", "Edge", "Application", "msedge.exe")
+_EDGE_MEMO = []
+
+
+def _edge_from_registry():
+    """Windows 会给已安装程序登记 App Paths\\msedge.exe，这是最权威的一条。"""
+    try:
+        import winreg
+    except ImportError:
+        return None
+    for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+        for view in (winreg.KEY_WOW64_64KEY, winreg.KEY_WOW64_32KEY):
+            try:
+                h = winreg.OpenKey(
+                    hive,
+                    r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\msedge.exe",
+                    0, winreg.KEY_READ | view)
+            except OSError:
+                continue
+            try:
+                v = winreg.QueryValueEx(h, "")[0]
+                if v and os.path.isfile(v):
+                    return v
+            except OSError:
+                pass
+    return None
 
 
 def find_edge():
-    for p in EDGE_PATHS:
-        if os.path.exists(p):
-            return p
-    # 兜底：从注册表/环境里再找一次（Edge 装在非默认位置的情况）
-    for env_key in ("ProgramFiles(x86)", "ProgramFiles", "LOCALAPPDATA"):
+    if _EDGE_MEMO:
+        return _EDGE_MEMO[0]
+    cands = [_edge_from_registry()]
+    for env_key in ("ProgramFiles(x86)", "ProgramFiles", "ProgramW6432",
+                    "LOCALAPPDATA", "SystemDrive"):
         root = os.environ.get(env_key)
         if not root:
             continue
-        p = os.path.join(root, "Microsoft", "Edge", "Application", "msedge.exe")
-        if os.path.exists(p):
+        if env_key == "SystemDrive":
+            # SystemDrive 是 "C:"，补成根目录再拼默认的 Program Files 位置
+            for sub in ("Program Files (x86)", "Program Files"):
+                cands.append(os.path.join(root + "\\", sub, *_EDGE_REL))
+            continue
+        cands.append(os.path.join(root, *_EDGE_REL))
+    # 最后再试最常见的默认位置（少数机器上环境变量是空的）
+    cands += [r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+              r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"]
+    for p in cands:
+        if p and os.path.exists(p):
+            _EDGE_MEMO.append(p)
             return p
     return None
 

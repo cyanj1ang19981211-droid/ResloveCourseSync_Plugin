@@ -193,7 +193,9 @@ This project is **portable** — no hard-coded user paths. Copy (or unzip) the w
 
 | Key | Description | Default |
 |---|---|---|
+| `resolve_install_dir` | Resolve install directory (contains `Resolve.exe` and `fusionscript.dll`); empty = auto-detect | `null` |
 | `resolve_script_path` | Path to the Resolve scripting module (empty = auto-detect) | `null` |
+| `resolve_script_lib` | Full path to `fusionscript.dll` (empty = auto-detect; only needed if the two above fail) | `null` |
 | `data_dir` | Course data directory | `data` |
 | `port` | Local server port | `8765` |
 | `poll_interval` | Polling interval (seconds) | `0.1` |
@@ -205,11 +207,31 @@ This project is **portable** — no hard-coded user paths. Copy (or unzip) the w
 
 > The port can also be overridden with the `RESOLVE_SYNC_PORT` environment variable (useful for a second instance or automated tests).
 
-The Resolve scripting module is commonly located at:
+External scripting needs two files whose locations **differ on every machine**:
+
+1. **The scripting module** (official wrapper), usually on the system drive:
+   `C:\ProgramData\Blackmagic Design\DaVinci Resolve\Support\Developer\Scripting\Modules`
+2. **`fusionscript.dll`** (native library), which lives in the **Resolve install
+   directory itself**. The official module hard-codes
+   `C:\Program Files\Blackmagic Design\DaVinci Resolve\`, so an install on any
+   other drive (`D:\Software\DaVinci`, `E:\Davinci`, …) cannot be reached from outside.
+
+The plugin searches automatically, in this order: running Resolve process →
+Windows Installer-registered install directories → Start Menu/Desktop shortcuts →
+common directories on every drive → a depth- and time-limited disk scan.
+The first hit is cached in `.runtime/resolve_paths.json`, so it is a one-time cost.
+When several Resolve copies exist (leftovers from an upgrade), the registry-recorded
+version is used to pick the one actually in use.
+
+If it still fails (item 【2】 of `检查环境.bat` lists every directory it tried),
+set one of the three keys above:
+
+```json
+{ "resolve_install_dir": "D:\\Software\\DaVinci" }
 ```
-C:\ProgramData\Blackmagic Design\DaVinci Resolve\Support\Developer\Scripting\Modules
-```
-If auto-detection fails, set `resolve_script_path` to this path.
+
+To find that directory: right-click "DaVinci Resolve" in the Start Menu → More →
+Open file location.
 
 ## Data Format
 
@@ -325,6 +347,7 @@ elliptical 3 / bodyweight 5).
 This project follows [Semantic Versioning](https://semver.org/).
 
 - **v0.5.0** — **"It won't connect / won't sync" is no longer guesswork:** the environment check gained item **[3] "live Resolve connection test"** (spawns a subprocess that really calls `scriptapp("Resolve")` and reports the current project / timeline / whether a course matches), the port check now asks the running backend what *it* sees, and the backend gained a `/diag` endpoint plus self-reported instance info (PID, start time, code dir, data dir) so a stale instance from *another folder* is obvious. Also documents the key prerequisite that **external scripting is Studio-only since Resolve 19.1** (the free edition cannot work).
+- **v0.4.1** — **Works no matter where Resolve is installed:** previously only a few hard-coded install directories were recognised, and the official `DaVinciResolveScript.py` hard-codes `C:\Program Files\Blackmagic Design\DaVinci Resolve\` for `fusionscript.dll`, so an install on `D:\Software\DaVinci` or `E:\Davinci` could never connect. The plugin now searches in order: running Resolve process → Windows Installer-registered install directories → Start Menu/Desktop shortcuts → common directories on every drive → a depth- and time-limited disk scan, and caches the hit in `.runtime/resolve_paths.json`. Leftover copies of Resolve are disambiguated by the registry-recorded version; the environment report lists every directory tried and how many installs exist; Edge is now located via the registry instead of hard-coded paths. Also fixes two related bugs: "start the plugin before Resolve" could get stuck forever if the DLL was not found at startup, and the not-found error gave no clue about where it had looked.
 - **v0.4.0** — **No more guesswork on a fresh machine:** every `.bat` is now ASCII-only (fixes the garbled "*is not recognized as an internal or external command*" errors seen on another machine); added `检查环境.bat` + `env_check.py` environment check with a Chinese report; `start.bat` no longer fails silently (opens `SETUP-GUIDE.txt` when Python is missing, shows a Chinese message box on startup errors); portable Python support (`runtime\python\`) for machines without admin rights; added `check_bat.py` as a regression guard.
 - **v0.3.0** — Stair climber support (speed shown as a level + resistance/distance); `convert.bat` accepts multiple files at once; the parser now identifies columns by header text and handles the "one xlsx per lesson" layout.
 - **v0.2.0** — Graphical startup and conversion, screen-ratio overlay sizing, built-in always-on-top with a pin toggle, dual-role action button.
