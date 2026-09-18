@@ -1,44 +1,60 @@
 @echo off
-rem 注意：本窗口标题不要包含「课程强度同步」——launcher 靠窗口标题判断悬浮窗是否被关闭。
-title 插件启动器
+rem =====================================================================
+rem  Course Intensity Sync - one-click launcher
+rem
+rem  Double-click this file. It starts the background server and opens the
+rem  always-on-top overlay window. Closing the overlay shuts everything
+rem  down again - there is no stray process left behind.
+rem
+rem  -------------------------------------------------------------------
+rem  *** THIS FILE MUST STAY 100%% ASCII - DO NOT PASTE CHINESE IN HERE ***
+rem
+rem  cmd.exe decodes a .bat using the console code page. A .bat holding GBK
+rem  bytes falls apart on any machine whose code page is not 936 (e.g.
+rem  "Beta: Use Unicode UTF-8" enabled -> 65001): bytes get mis-paired,
+rem  comments leak out as commands, if/for blocks break. ASCII is immune.
+rem  All Chinese messages live in Python (env_check.py / launcher.py),
+rem  which writes to the console through the Win32 API and never garbles.
+rem  -------------------------------------------------------------------
+rem =====================================================================
+
+setlocal
+
+rem Console title intentionally in ASCII and intentionally NOT the overlay
+rem caption (a Chinese string defined in overlay.py): launcher.py decides
+rem "the user closed the overlay" by scanning for a window with that caption,
+rem so this console must not carry it, otherwise the launcher would never
+rem notice that the overlay was closed.
+title Course Sync - Launcher
+
 cd /d "%~dp0"
 
-rem ===== 自动定位 Python 解释器（可移植：不再写死本机用户路径） =====
-rem 达芬奇 fusionscript 仅兼容 Python 3.10 / 3.11，因此优先找 3.11，其次 3.10。
-set "PY="
-rem 1) 通过 py 启动器按版本精确查找（最可靠）
-for /f "delims=" %%v in ('py -3.11 -c "import sys;print(sys.executable)" 2^>nul') do if not "%%v"=="" set "PY=%%v"
-if "%PY%"=="" for /f "delims=" %%v in ('py -3.10 -c "import sys;print(sys.executable)" 2^>nul') do if not "%%v"=="" set "PY=%%v"
-rem 2) 回退：系统 PATH 里的 python（若恰好是 3.10/3.11 也可用）
-if "%PY%"=="" where python >nul 2>nul && set "PY=python"
-rem 3) 最后回退：py 启动器默认版本
-if "%PY%"=="" where py >nul 2>nul && set "PY=py -3"
+call "%~dp0_find_python.bat"
+if not defined PY goto :no_python
 
-if "%PY%"=="" (
-    echo [错误] 未找到 Python，请先安装 Python 3.10 或 3.11
-    echo.
-    pause
-    exit /b 1
-)
+rem Start the launcher minimised in the background. It hides its own console
+rem right away and takes over from here (start server -> open overlay ->
+rem watch the overlay -> clean up when it closes).
+start "" /min %LAUNCH% "%~dp0launcher.py"
 
-rem ===== 选择启动命令 =====
-rem PY 是完整路径时，优先用同目录的 pythonw.exe —— 完全不会出现控制台窗口；
-rem 否则（PY 形如 py -3）直接用 PY 跑，launcher 会立刻把自己的控制台隐藏。
-rem 注意引号：完整路径可能带空格，必须加引号；"py -3" 这种带参数的命令则不能加。
-set "LAUNCH=%PY%"
-if exist "%PY%" for %%d in ("%PY%") do if exist "%%~dpdpythonw.exe" set "LAUNCH="%%~dpdpythonw.exe""
-
-echo ============================================
-echo   课程强度同步插件 - 一键启动
-echo   使用 Python: %PY%
-echo ============================================
-echo.
-echo 后端会在后台静默运行，稍等片刻会自动弹出悬浮窗。
-echo 关掉悬浮窗，后端会自动退出（不会留下后台进程）。
-echo.
-
-rem ===== 启动 launcher：它负责「后台起后端 + 开悬浮窗 + 关窗自动收尾」 =====
-start "" /min %LAUNCH% launcher.py
-
-rem 本窗口使命完成，立刻关掉（launcher 是独立进程，不受影响）
+rem This window has done its job. The launcher is a separate process.
 exit /b 0
+
+rem ---------------------------------------------------------------------
+:no_python
+rem Chinese cannot be echoed from a .bat safely (see the note above), so
+rem show a short ASCII hint and open the Chinese guide in Notepad instead.
+echo.
+echo   [X] Python was not found on this computer.
+echo.
+echo       This plugin needs Python 3.10 or 3.11.
+echo       Two ways to fix it - both are written up in SETUP-GUIDE.txt:
+echo         1) install Python 3.11 (tick "Add python.exe to PATH")
+echo         2) or drop a portable Python into runtime\python\
+echo.
+if exist "%~dp0SETUP-GUIDE.txt" start "" notepad "%~dp0SETUP-GUIDE.txt"
+if not exist "%~dp0SETUP-GUIDE.txt" echo       [!] SETUP-GUIDE.txt is missing - the folder was not copied completely.
+echo.
+echo   Press any key to close this window ...
+pause >nul
+exit /b 1

@@ -37,6 +37,10 @@ config.local.json
 # 运行时目录（后端日志等，start.bat 启动时自动生成）
 .runtime/
 
+# 便携版 Python（体积很大，各机器自行准备，不入库）
+# 没有管理员权限装 Python 的机器，可以把 Python 拷到 runtime\python\ 里
+runtime/
+
 # 探针诊断脚本（临时调试用，非正式功能）
 probe_raw.py
 

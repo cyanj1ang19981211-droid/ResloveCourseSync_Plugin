@@ -34,17 +34,41 @@ overlay.html  ── 暗色悬浮窗，实时渲染
 | `equipment_config.py` | 器械字段配置（跑步机/爬楼机/单车/划船机/椭圆机/徒手）+ 器械识别 |
 | `overlay.html` / `overlay.py` | 暗色悬浮窗 + Edge app 启动器（图钉置顶 / 自动纠正尺寸） |
 | `xlsx_to_json.py` | **把课件 xlsx 转成插件 JSON**（命令行入口） |
-| `convert_course.py` / `convert.bat` | 图形化转换：弹文件选择框 → 生成 JSON |
-| `launcher.py` | `start.bat` 背后真正干活的：后台起后端 + 开悬浮窗 + 跟随图钉保置顶 + 关窗收尾 |
+| `convert_course.py` / `convert.bat` | 图形化转换：弹文件选择框（支持多选）→ 生成 JSON |
+| `launcher.py` | `start.bat` 背后真正干活的：启动前环境自检 + 后台起后端 + 开悬浮窗 + 跟随图钉保置顶 + 关窗收尾 |
 | `start.bat` | 一键启动（无黑框；关掉悬浮窗即全部退出） |
+| `env_check.py` / `检查环境.bat` | **环境体检**：Python 版本、达芬奇、Edge、课件、端口逐项检查并给中文报告 |
+| `_find_python.bat` | 三个 bat 共用的 Python 定位逻辑（便携版 → py 3.11 → py 3.10 → 常见安装目录 → PATH） |
+| `check_bat.py` | 开发者用的 bat 体检（防止 .bat 里又混进非 ASCII 编码导致乱码） |
+| `SETUP-GUIDE.txt` | 中文安装指引；找不到 Python 时 `start.bat` 会自动用记事本打开它 |
 | `config.json` | 配置（端口、数据目录、达芬奇脚本路径） |
 | `data/` | 课程 JSON 数据（私密业务数据，不纳入版本管理） |
 
 ## 环境要求
 
-- Windows + DaVinci Resolve（Studio 或免费版均可，需支持 Scripting API）。
-- Python **3.10 或 3.11**（必须——达芬奇的 `fusionscript` 模块只支持这两个版本，3.12+ 会崩）。
+- Windows 10 / 11 + DaVinci Resolve（Studio 或免费版均可，需支持 Scripting API）。
+- Python **3.10 或 3.11**（必须——达芬奇的 `fusionscript` 模块只支持这两个版本，3.12+ 连不上达芬奇）。
+- Microsoft Edge（悬浮窗用 `--app` 模式开；Win10/11 一般自带）。
 - 无需第三方 Python 库（纯标准库实现）。
+
+> **拿到这个仓库的压缩包，在别的电脑上怎么跑？**
+> 先双击 **`检查环境.bat`**。它会逐项检查并告诉你缺什么、怎么补。
+> 如果那台电脑根本没装 Python，`start.bat` 会自动打开 `SETUP-GUIDE.txt`
+> 给你一份中文安装指引（含没有管理员权限时的便携版方案）。
+
+### 关于 Python 定位
+
+`_find_python.bat` 按这个顺序找解释器，找到就用：
+
+1. 项目里的 `runtime\python\python.exe`（**便携版**，见下）
+2. `py -3.11` → `py -3.10` → `py -3`（`py` 启动器，按版本精确查找）
+3. 常见安装目录（`%LOCALAPPDATA%\Programs\Python\Python311` 等）——
+   覆盖「装了 Python 但没勾 Add to PATH」的情况
+4. PATH 里的 `python`
+
+**没有管理员权限装不了 Python 时**：在一台装好 Python 3.11 的电脑上，把 Python
+整个文件夹拷到本项目的 `runtime\python\` 下，插件会优先用它。整个文件夹（含
+`runtime`）打包拷给同事，对方解压即用，不需要装任何东西。
 
 ## 使用步骤
 
@@ -194,13 +218,40 @@ C:\ProgramData\Blackmagic Design\DaVinci Resolve\Support\Developer\Scripting\Mod
 - 单车 表头「RPM」→ `rpm`，「阻力」→ `resistance`
 - 划船机 表头「SPM」→ `spm`，「阻力」→ `resistance`
 
-已随项目转换 26 节课件（跑步机 10 / 单车 5 / 划船机 3 / 椭圆机 3 / 徒手 5）。
+已随项目转换 32 节课件（跑步机 10 / 爬楼机 6 / 单车 5 / 划船机 3 / 椭圆机 3 / 徒手 5）。
 
 > 爬楼机与带坡度跑步机的区别：跑步机的速度是真实速度（km/h，可换算配速），
 > 爬楼机是**原地蹬踏**，课件里写的「建议速度」其实是**档位**，所以单位用「级」、
 > 也不算配速。其余（分段恒定、可选字段自动隐藏）与跑步机完全一致。
 
 ## 常见问题
+
+**换了台电脑 / 刚下载压缩包，跑不起来**
+
+- **双击 bat 时滚出一堆「××× 不是内部或外部命令」**：旧版本的问题。这些 `.bat`
+  以前是 GBK 编码存的，`cmd.exe` 按控制台代码页解码，在代码页不是 936 的机器上
+  （典型：系统开了「Beta: 使用 Unicode UTF-8」→ 65001）会被逐字节拆错，
+  `rem` 注释漏出来当命令执行、`if (...)` 块结构断掉。现已把所有 `.bat` 改成
+  **纯 ASCII**（中文一律交给 Python 打印），任何代码页下都不会再出这个问题。
+  → 请重新下载最新版。`python check_bat.py` 可以校验这一点。
+
+- **双击 `start.bat` 没有任何反应**：正常情况下就应该「什么都不发生」——插件是后台
+  静默运行的，一两秒后悬浮窗会自己弹出来。如果一直没窗口，最新版会**弹一个中文
+  提示框**告诉你原因（以前是静默退出，什么都看不到）。实在没提示框，就双击
+  **`检查环境.bat`**，把屏幕内容截图反馈。
+
+- **提示找不到 Python**：那台电脑没装 Python（或装了但没勾 *Add python.exe to PATH*）。
+  按自动打开的 `SETUP-GUIDE.txt` 装一个 Python 3.11 即可；
+  没有管理员权限的话，用里面的「便携版 Python」方案（拷 `runtime\python\`）。
+
+- **Python 版本是 3.12 / 3.13 / 3.14**：达芬奇的 `fusionscript` 只认 3.10 / 3.11，
+  更高版本连不上达芬奇。另装一个 3.11 共存即可（可以让两个版本同时存在）。
+
+- **怎么确认这台电脑能不能跑**：双击 `检查环境.bat`，会打印一份中文体检报告，
+  逐项列出 Python 版本、达芬奇、Edge、课件、端口的情况和补救办法，
+  并存到 `.runtime\环境体检报告.txt`。
+
+**运行中**
 
 - **悬浮窗显示「无法连接服务」**：先运行 `server.py`。
 - **状态一直「正在连接达芬奇」**：确认达芬奇已启动、外部脚本已开启为 Local。
@@ -220,6 +271,10 @@ C:\ProgramData\Blackmagic Design\DaVinci Resolve\Support\Developer\Scripting\Mod
 
 本项目遵循[语义化版本](https://semver.org/)。
 
+- **v0.4.0** —— **换机器/首次使用不再靠猜**：所有 `.bat` 改为纯 ASCII（修掉换机器后
+  「不是内部或外部命令」的乱码报错）；新增 `检查环境.bat` + `env_check.py` 中文环境体检；
+  `start.bat` 不再静默失败（找不到 Python 自动打开 `SETUP-GUIDE.txt`，启动异常弹中文提示框）；
+  支持便携版 Python（`runtime\python\`），应对无管理员权限的机器；新增 `check_bat.py` 防回归。
 - **v0.3.0** —— 爬楼机适配（速度按档位「级」显示 + 阻力/距离）；`convert.bat` 支持一次多选/多拖多份课件；课件解析改为按表头识别列，兼容「一节课一个 xlsx」的新格式。
 - **v0.2.0** —— 图形化启动与转换、悬浮窗按屏幕比例自适应、自带置顶 + 图钉开关、右下角按钮双身份。
 - **v0.1.0** —— 初始版本：器械类课程适配（跑步机/单车/划船机/椭圆机/徒手）+ 基础悬浮窗。
@@ -230,4 +285,5 @@ C:\ProgramData\Blackmagic Design\DaVinci Resolve\Support\Developer\Scripting\Mod
 
 ## 许可
 
-专有软件，保留所有权利。课程数据（`data/`）为私密业务数据，已刻意排除在版本管理之外。
+源码公开可见，但未附开源许可证：著作权归作者所有，保留所有权利（如需授权使用请联系作者）。
+课程数据（`data/`）为私密业务数据，已刻意排除在版本管理之外。

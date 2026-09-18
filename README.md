@@ -35,16 +35,42 @@ overlay.html  ── dark overlay window, real-time rendering
 | `overlay.html` / `overlay.py` | Dark overlay window + Edge app-mode launcher (pin-button topmost, auto size fix) |
 | `xlsx_to_json.py` | **Converts course `.xlsx` files into plugin JSON** (command-line entry) |
 | `convert_course.py` / `convert.bat` | Graphical conversion: file-picker dialog → JSON |
-| `launcher.py` | What `start.bat` actually runs: hidden backend + overlay + topmost keep-alive + auto-shutdown |
+| `launcher.py` | What `start.bat` actually runs: pre-flight environment check + hidden backend + overlay + topmost keep-alive + auto-shutdown |
 | `start.bat` | One-click startup (no console window; closing the overlay exits everything) |
+| `env_check.py` / `检查环境.bat` | **Environment check**: Python version, Resolve, Edge, course files and port, with a Chinese report |
+| `_find_python.bat` | Shared interpreter discovery used by all `.bat` files (portable → py 3.11 → 3.10 → common folders → PATH) |
+| `check_bat.py` | Developer lint: keeps the `.bat` files ASCII-only so they cannot break on a different code page |
+| `SETUP-GUIDE.txt` | Chinese setup guide; `start.bat` opens it in Notepad when no Python is found |
 | `config.json` | Configuration (port, data dir, Resolve scripting path) |
 | `data/` | Course JSON data (private; not version-controlled) |
 
 ## Requirements
 
-- Windows + DaVinci Resolve (Studio or Free, with Scripting API support).
-- Python **3.10 or 3.11** (required — DaVinci Resolve's `fusionscript` module only supports these versions; 3.12+ will crash).
+- Windows 10 / 11 + DaVinci Resolve (Studio or Free, with Scripting API support).
+- Python **3.10 or 3.11** (required — DaVinci Resolve's `fusionscript` module only supports these versions; 3.12+ cannot talk to Resolve).
+- Microsoft Edge (the overlay uses `--app` mode; bundled with Windows 10/11).
 - No third-party Python packages required (pure standard library).
+
+> **Downloaded the ZIP and it will not run on the other machine?**
+> Double-click **`检查环境.bat`** (environment check) first — it prints a report of
+> every requirement with a concrete fix. If that machine has no Python at all,
+> `start.bat` opens `SETUP-GUIDE.txt` (a Chinese guide covering both a normal
+> install and the no-admin-rights portable option).
+
+### How Python Is Located
+
+`_find_python.bat` picks the first interpreter it finds, in this order:
+
+1. `runtime\python\python.exe` inside the project (**portable Python**, see below)
+2. `py -3.11` → `py -3.10` → `py -3` (the `py` launcher, exact versions first)
+3. Common install folders (`%LOCALAPPDATA%\Programs\Python\Python311`, …) —
+   covers "Python installed but PATH was not ticked"
+4. `python` on PATH
+
+**No admin rights to install Python?** Copy a whole Python 3.11 folder from a
+machine that works into `runtime\python\` here. The plugin prefers it, so the
+target machine needs no install at all. Ship the entire folder (including
+`runtime`) and your colleague can just unzip and run.
 
 ## Usage
 
@@ -134,12 +160,30 @@ python overlay.py    # start overlay
 
 ## Deploying to Another Machine
 
-This project is **portable** — no hard-coded user paths. Copy the whole folder to the target machine and ensure the following:
+This project is **portable** — no hard-coded user paths. Copy (or unzip) the whole folder on the target machine, then:
 
-1. **Python 3.10 or 3.11** is installed (the `fusionscript` module only works on these versions).
-2. **DaVinci Resolve** is installed and **External scripting** is enabled (`Preferences → System → General → External scripting using = Local`).
-3. The Resolve scripting module is normally at the fixed system path `C:\ProgramData\Blackmagic Design\DaVinci Resolve\Support\Developer\Scripting\Modules` — this is **independent of which drive** Resolve is installed on. If auto-detection fails, set `resolve_script_path` in `config.json`.
-4. Run `start.bat` — it auto-locates Python via the `py` launcher (prefers 3.11, then 3.10, then falls back to `python` on PATH).
+1. **Run the environment check first** — double-click `检查环境.bat`. It reports Python
+   version, Resolve, Edge, course files, port and file completeness, each with a fix.
+2. **Python 3.10 or 3.11** must be available to the plugin. `_find_python.bat` looks for a
+   portable `runtime\python\`, then `py -3.11` / `py -3.10` / `py -3`, then the usual install
+   folders, then PATH. If nothing is found, `start.bat` opens `SETUP-GUIDE.txt` (Chinese)
+   in Notepad. Python 3.12+ cannot talk to Resolve — install 3.11 alongside it.
+3. **DaVinci Resolve** must be installed with **External scripting** enabled
+   (`Preferences → System → General → External scripting using = Local`).
+4. The Resolve scripting module normally lives at the fixed system path
+   `C:\ProgramData\Blackmagic Design\DaVinci Resolve\Support\Developer\Scripting\Modules` —
+   **independent of which drive** Resolve is installed on. If auto-detection fails, set
+   `resolve_script_path` in `config.json`.
+5. Run `start.bat`. `launcher.py` runs the pre-flight check and shows a message box
+   (in Chinese) if anything blocking is missing — it no longer fails silently.
+
+> **Note on `.bat` encoding:** every `.bat` in this repo is deliberately **ASCII-only** and
+> CRLF. `cmd.exe` decodes a batch file using the console code page, so GBK bytes inside one
+> fall apart on any machine whose code page is not 936 (e.g. with *Beta: Use Unicode UTF-8*
+> enabled → 65001): comments leak out as commands and `if/for` blocks break, producing a wall
+> of "*is not recognized as an internal or external command*". All Chinese messages are
+> printed by Python instead (it writes through `WriteConsoleW`, which is code-page agnostic).
+> Run `python check_bat.py` to verify this invariant.
 
 ## Configuration (`config.json`)
 
@@ -215,9 +259,35 @@ If auto-detection fails, set `resolve_script_path` to this path.
 > unit is "级" (level) and no pace is derived. Everything else (constant per segment, optional
 > fields hidden when absent) is identical to the treadmill.
 
-26 courses are converted with the project (treadmill 10 / bike 5 / rower 3 / elliptical 3 / bodyweight 5).
+32 courses are currently converted (treadmill 10 / stair climber 6 / bike 5 / rower 3 /
+elliptical 3 / bodyweight 5).
 
 ## FAQ
+
+**On a fresh machine / after downloading the ZIP**
+
+- **A wall of "*is not recognized as an internal or external command*" when running a `.bat`**:
+  an old-version problem. Those `.bat` files used to be stored as GBK, and `cmd.exe` decodes a
+  batch file with the console code page — so on a machine whose code page is not 936 (typically
+  with *Beta: Use Unicode UTF-8* enabled → 65001) the bytes got mis-paired, comments leaked out
+  as commands and `if/for` blocks broke. Every `.bat` is now **ASCII-only** (Chinese is printed
+  by Python instead), which is code-page independent. Download the latest version;
+  `python check_bat.py` verifies the invariant.
+- **Double-clicking `start.bat` seems to do nothing**: that *is* the normal behaviour — the
+  plugin runs silently in the background and the overlay pops up a second or two later. If no
+  window ever appears, the current version shows a **Chinese message box** explaining why
+  (older versions exited silently). If even that does not appear, double-click
+  `检查环境.bat` and send a screenshot.
+- **"Python was not found"**: that machine has no Python, or it was installed without
+  *Add python.exe to PATH*. Follow the `SETUP-GUIDE.txt` that opens automatically — install
+  Python 3.11, or use the portable-Python option (`runtime\python\`) if you lack admin rights.
+- **Python is 3.12 / 3.13 / 3.14**: Resolve's `fusionscript` only supports 3.10 / 3.11 and cannot
+  connect on newer versions. Install 3.11 alongside it — both can coexist.
+- **How do I know whether this machine can run it?** Double-click `检查环境.bat` for a full
+  report (Python version, Resolve, Edge, course files, port) with fixes; it is also saved to
+  `.runtime\环境体检报告.txt`.
+
+**While running**
 
 - **Overlay shows "cannot connect to service"**: run `server.py` first.
 - **Status stuck on "connecting to Resolve"**: make sure Resolve is running and external scripting is set to Local.
@@ -238,6 +308,7 @@ If auto-detection fails, set `resolve_script_path` to this path.
 
 This project follows [Semantic Versioning](https://semver.org/).
 
+- **v0.4.0** — **No more guesswork on a fresh machine:** every `.bat` is now ASCII-only (fixes the garbled "*is not recognized as an internal or external command*" errors seen on another machine); added `检查环境.bat` + `env_check.py` environment check with a Chinese report; `start.bat` no longer fails silently (opens `SETUP-GUIDE.txt` when Python is missing, shows a Chinese message box on startup errors); portable Python support (`runtime\python\`) for machines without admin rights; added `check_bat.py` as a regression guard.
 - **v0.3.0** — Stair climber support (speed shown as a level + resistance/distance); `convert.bat` accepts multiple files at once; the parser now identifies columns by header text and handles the "one xlsx per lesson" layout.
 - **v0.2.0** — Graphical startup and conversion, screen-ratio overlay sizing, built-in always-on-top with a pin toggle, dual-role action button.
 - **v0.1.0** — Initial release: equipment-based course adaptation (treadmill / bike / rower / elliptical / bodyweight) + basic overlay.
@@ -245,8 +316,9 @@ This project follows [Semantic Versioning](https://semver.org/).
 ## Roadmap
 
 - **Multi-language course adaptation** — configurable header/label detection and equipment-name prefix matching for non-Chinese course files.
-- **Frontend polish + course cache invalidation** — in-memory course caching, `data/` reload, and a "clear cache" endpoint.
 
 ## License
 
-Proprietary. All rights reserved. Course data (`data/`) is confidential business data and is intentionally excluded from version control.
+Source is publicly visible, but no open-source license is attached: copyright remains with the
+author and all rights are reserved (contact the author for permission to reuse). Course data
+(`data/`) is confidential business data and is intentionally excluded from version control.

@@ -26,7 +26,36 @@ from ctypes import wintypes
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import overlay  # noqa: E402
+
+def _raw_message_box(text, title="课程强度同步", warn=True):
+    """最底层、零依赖的弹窗（只用 ctypes）。
+
+    为什么单独留一个：下面的 import 万一失败（文件没拷全、Python 版本不对），
+    也得有办法让用户看到原因。否则「双击了但什么都不发生」——这正是用户
+    反馈过的问题。
+    """
+    try:
+        MB_ICONWARNING = 0x30
+        MB_ICONINFORMATION = 0x40
+        ctypes.windll.user32.MessageBoxW(
+            None, str(text), str(title),
+            (MB_ICONWARNING if warn else MB_ICONINFORMATION) | 0x40000,  # MB_TOPMOST
+        )
+    except Exception:
+        pass
+
+
+try:
+    import overlay  # noqa: E402
+except Exception as _e:                       # pragma: no cover - 兜底路径
+    _raw_message_box(
+        "启动失败：读不到 overlay.py。\n\n"
+        "多半是文件夹没有完整复制 —— 请把整个项目文件夹一起拷过来，"
+        "不要只拷一部分文件。\n\n"
+        "具体错误：" + repr(_e),
+        title="课程强度同步 - 启动失败",
+    )
+    raise SystemExit(1)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 RUNTIME_DIR = os.path.join(BASE_DIR, ".runtime")
@@ -262,11 +291,46 @@ def kill_stale_server(port):
 
 # ---------- 主流程 ----------
 
+def _preflight_message():
+    """启动前的环境自检。返回要弹给用户的文字；一切正常返回 None。
+
+    目的：把「双击了但什么都没发生」变成「弹个框直接告诉你缺什么」。
+    自检本身出问题（文件缺失、导入失败等）一律放行 —— 不能因为体检程序
+    自己坏了就把插件拦住。
+    """
+    try:
+        import env_check
+        fatal = env_check.fatal_problems(env_check.run_checks())
+        if not fatal:
+            return None
+        lines = ["启动前的环境检查没有通过，插件现在跑不起来：", ""]
+        for r in fatal:
+            lines.append("【" + str(r.get("title") or "") + "】")
+            for l in (r.get("lines") or []):
+                lines.append("  " + str(l).strip())
+            advice = r.get("advice")
+            if advice:
+                lines.append("  怎么办：")
+                for l in str(advice).split("\n"):
+                    lines.append("    " + l.strip())
+            lines.append("")
+        lines.append("双击文件夹里的「检查环境.bat」可以看到完整报告。")
+        return "\n".join(lines)
+    except Exception:
+        return None
+
+
 def main(argv=None):
     argv = argv if argv is not None else sys.argv[1:]
     monitor_ui = "--no-monitor" not in argv
 
     _hide_own_console()
+
+    # 启动前先体检：有问题就弹框说清楚，而不是悄无声息地什么都不发生
+    pre = _preflight_message()
+    if pre:
+        _message_box(pre, title="课程强度同步 - 无法启动")
+        return 1
 
     port = _read_port()
     print(f"[启动] 后端端口 {port}，日志：{SERVER_LOG}", flush=True)
@@ -368,4 +432,19 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # 最后一道防线：任何没预料到的异常都弹窗说清楚。
+    # 没有这个的话，pythonw 下异常只会写进一个不存在的控制台 ——
+    # 用户看到的现象就是「双击了，什么反应都没有」。
+    try:
+        sys.exit(main())
+    except SystemExit:
+        raise
+    except BaseException:
+        import traceback
+        _raw_message_box(
+            "插件启动失败（未预料的错误）。\n\n"
+            "把下面这段内容发给开发者可以定位问题：\n\n"
+            + traceback.format_exc()[-1500:],
+            title="课程强度同步 - 启动失败",
+        )
+        sys.exit(1)
