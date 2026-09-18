@@ -76,7 +76,9 @@ EQUIPMENTS = {
         "fields": [
             {"key": "speed",      "label": "速度",   "unit": "级",    "required": True,  "priority": 1},
             {"key": "resistance", "label": "阻力",   "unit": "级",    "required": False, "priority": 2},
-            {"key": "distance",   "label": "距离",   "unit": "km",    "required": False, "priority": 3},
+            # 距离按「米」显示（跑步机是「公里」）：爬楼机原地蹬踏，一节课几百米，
+            # 用公里会出现 0.078 这种不好读的数；换算见 xlsx_to_json.EQUIP_METRICS
+            {"key": "distance",   "label": "距离",   "unit": "m",     "required": False, "priority": 3},
         ],
     },
 

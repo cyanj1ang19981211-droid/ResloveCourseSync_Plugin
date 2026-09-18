@@ -36,6 +36,7 @@ xlsx_to_json.py —— 把「冠军课程课件.xlsx」里的课件表转换成�
     按列号写死会把 (2) 的「距离」当成「时长」（300 米 -> 300 分钟），所以改成看表头。
 """
 
+import difflib
 import json
 import os
 import re
@@ -48,14 +49,19 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 
-# 器械类型 -> (主指标 key, 副指标 key)
+# 器械类型 -> (主指标 key, 副指标 key, 距离列的换算除数)
+#
+# 距离列的原始值都是「米」（拿跑步机老总表核过：一节 20 分钟的爬坡课合计 1208 米，
+# 对应速度 2~7 km/h，量级对得上）。
+#   跑步机 / 单车 / 划船机 / 椭圆机：换算成公里显示（÷1000）
+#   爬楼机：原地蹬踏，一节课也就几百米，按「米」显示更直观（÷1）
 EQUIP_METRICS = {
-    "treadmill":    ("speed",  "incline"),
-    "stairclimber": ("speed",  "resistance"),
-    "bike":         ("rpm",    "resistance"),
-    "rower":        ("spm",    "resistance"),
-    "elliptical":   ("rpm",    "resistance"),
-    "bodyweight":   (None,     None),
+    "treadmill":    ("speed",  "incline",    1000.0),
+    "stairclimber": ("speed",  "resistance",    1.0),
+    "bike":         ("rpm",    "resistance", 1000.0),
+    "rower":        ("spm",    "resistance", 1000.0),
+    "elliptical":   ("rpm",    "resistance", 1000.0),
+    "bodyweight":   (None,     None,         1000.0),
 }
 
 # 表头文字 -> 语义列。按顺序匹配，先命中的角色生效（每个表头只归一个角色）。
@@ -436,7 +442,7 @@ def parse_sheet(sheet_name, rows, source_name="", log=None, single_sheet=False):
 
     # 器械识别：工作表名前缀 -> 工作表名关键词 -> 文件名/路径关键词
     equipment = detect_equipment(sheet_name, source_name)
-    main_key, sub_key = EQUIP_METRICS.get(equipment, (None, None))
+    main_key, sub_key, dist_div = EQUIP_METRICS.get(equipment, (None, None, 1000.0))
 
     # 表头行不写死行号：老总表在第 3 行，新单课表在第 1 行
     header_idx = find_header_row(rows)
@@ -539,10 +545,10 @@ def parse_sheet(sheet_name, rows, source_name="", log=None, single_sheet=False):
         if sub_key and e_num is not None:
             point[sub_key] = e_num
 
-        # 距离（米 -> 公里）
+        # 距离：原始值是米，按器械决定显示单位（跑步机->公里 / 爬楼机->米）
         h_num = _to_float(_cell_text(row, dist_col))
         if h_num is not None and h_num > 0:
-            point["distance"] = round(h_num / 1000.0, 3)
+            point["distance"] = round(h_num / dist_div, 3)
 
         if action:
             point["action"] = action
@@ -556,11 +562,27 @@ def parse_sheet(sheet_name, rows, source_name="", log=None, single_sheet=False):
     if cur_segment:
         cur_segment["end"] = int(round(cur_time))
 
+    # 课程主题（悬浮窗显示用的友好名）。
+    # 老总表里元信息的「课程主题」是准的（如工作表「跑步机-爬坡模拟训练」对应主题
+    # 「爬坡模拟训练」）；但新的单课表常常是**拿别的课复制一份改出来的**，元信息里
+    # 那一格往往还留着旧课名（实测见过文件叫「20min心肺间歇突破攀登」、里面写着
+    # 「35min稳态匀速耐力攀登」）。所以两者明显对不上时以 course_name 为准，
+    # 否则悬浮窗会赫然显示成另一节课。
+    #
+    # 用相似度而不是「互相包含」来判断，因为老总表里本来就有措辞微差（真实数据里
+    # 见过「跑步机 -护膝专项跑训练」配主题「护膝专项训练」、「轻松开跑训练」配
+    # 主题「轻松开炮训练」，后者是课件里的错别字）——那些相似度都在 0.6 以上，
+    # 而复制改名的两节课只有 0.38，用 0.5 作阈值正好分得开。
+    title = meta.get("course_name") or course_name
+    meta_title = meta.get("course_name")
+    if meta_title and difflib.SequenceMatcher(None, meta_title, course_name).ratio() < 0.5:
+        title = course_name
+
     course = {
         # course_name 用工作表全名（含器械前缀），与达芬奇时间线名匹配；
         # 工作表名是 Sheet1 时已由 effective_course_name 换成文件名
         "course_name": course_name,
-        "title": meta.get("course_name") or course_name,  # 课程主题（友好显示名）
+        "title": title,
         "equipment": equipment,
         "duration": int(round(cur_time)),
         "segments": segments,
