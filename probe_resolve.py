@@ -74,6 +74,13 @@ def probe():
             out["search_report"] = (d.get("search_report") or [])[:12]
             out["cached"] = bool(d.get("cached"))
             out["cache_file"] = d.get("cache_file") or ""
+            # config.json 里用户手填了什么、这份文件有没有被正常读进去。
+            # 「我明明指定了达芬奇目录」这类抱怨，答案基本都在这几行里。
+            out["config_problem"] = d.get("config_problem") or ""
+            out["config_notes"] = d.get("config_notes") or []
+            out["configured_install_dir"] = d.get("configured_install_dir") or ""
+            out["configured_script_lib"] = d.get("configured_script_lib") or ""
+            out["configured_script_path"] = d.get("configured_script_path") or ""
         except Exception as e:
             out["locate_error"] = "%s: %s" % (type(e).__name__, e)
 
@@ -164,6 +171,15 @@ def human(data):
               ("v" + str(data["exe_version"])) if data.get("exe_version") else "")
     if data.get("registered_version"):
         print("注册表版本  :", data["registered_version"])
+    for key, label in (("configured_install_dir", "配置指定安装目录"),
+                       ("configured_script_path", "配置指定模块目录"),
+                       ("configured_script_lib", "配置指定 dll")):
+        if data.get(key):
+            print("%s: %s" % (label, data[key]))
+    if data.get("config_problem"):
+        print("配置有问题  :", str(data["config_problem"]).replace("\n", " "))
+    for _n in (data.get("config_notes") or []):
+        print("配置提醒    :", str(_n).replace("\n", " "))
     if data.get("search_report"):
         print("找过这些地方（[有] = 该目录里确实有这个文件）:")
         for l in data["search_report"]:

@@ -227,11 +227,26 @@ If it still fails (item 【2】 of `检查环境.bat` lists every directory it t
 set one of the three keys above:
 
 ```json
-{ "resolve_install_dir": "D:\\Software\\DaVinci" }
+{ "resolve_install_dir": "D:/软件/达芬奇" }
 ```
 
 To find that directory: right-click "DaVinci Resolve" in the Start Menu → More →
 Open file location.
+
+**Path syntax / encoding:** use **forward slashes** (`D:/Software/DaVinci`) and you never
+have to think about escaping; if you prefer backslashes, write **two** (`"D:\\Software\\DaVinci"`).
+`config.json` is read through `config_io.py`, which tolerates the usual Notepad damage —
+UTF-8 **BOM**, **ANSI/GBK** encoding, a trailing comma, `//` comments, and single-backslash
+paths (it also undoes the silent `\t`/`\n`/`\b` escape corruption that makes `D:\tools\...`
+unmatchable). Anything auto-fixed is reported as a note. If the file is broken beyond repair
+the backend **still starts** with defaults and shows *"config.json has a syntax error
+(line N)"* in the overlay status bar and in the health report — instead of dying at import
+time, which used to look exactly like *"the overlay just keeps saying waiting for DaVinci"*.
+
+> **Unzipping to `D:\` (or any other drive) is not a problem.** Every path is resolved
+> relative to the plugin folder. "Waiting for DaVinci…" is always a Resolve-side issue:
+> external scripting not set to *Local* + Resolve not fully restarted, the free (non-Studio)
+> build, `fusionscript.dll` not found, or a timeline name that does not match a course name.
 
 ## Data Format
 

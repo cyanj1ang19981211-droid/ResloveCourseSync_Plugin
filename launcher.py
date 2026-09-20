@@ -107,8 +107,12 @@ def _read_port():
         return int(env_port)
     port = 8765
     try:
-        with open(os.path.join(BASE_DIR, "config.json"), "r", encoding="utf-8") as f:
-            port = int(json.load(f).get("port") or port)
+        # 必须和 server.py 用同一套容错读法：用户把 config.json 存成带 BOM 的
+        # UTF-8 时老写法读不出来，launcher 会在 8765 上干等，而后端其实听在
+        # 用户指定的端口上 —— 表现就是「后端启动失败」。
+        import config_io
+        cfg, _p, _n = config_io.load_config_file(os.path.join(BASE_DIR, "config.json"))
+        port = int(cfg.get("port") or port)
     except Exception:
         pass
     return port
@@ -183,9 +187,20 @@ def start_server(port):
     log.flush()
 
     py = sys.executable or "python"
+
+    # 上面这个日志文件是按 UTF-8 写的，所以尽量让子进程也用 UTF-8 输出：
+    # Python 发现 stdout 不是控制台就退回「系统代码页」编码（简体中文机器上是
+    # GBK），日志里混进 GBK 字节、而 _tail() 按 UTF-8 读 → 启动失败弹窗里的中文
+    # 全是乱码。这里设环境变量只是第一道；**真正兜底的是 server.py 模块级的
+    # _force_utf8_stdio()**，因为 multiprocessing 起出来的 worker 子进程并不听
+    # PYTHONIOENCODING（实测环境变量继承到了，sys.stdout.encoding 依旧是 gbk）。
+    env = dict(os.environ)
+    env["PYTHONIOENCODING"] = "utf-8"
+
     proc = subprocess.Popen(
         [py, SERVER_PY],
         cwd=BASE_DIR,                 # 保证相对路径（data/ 等）能解析
+        env=env,
         stdout=log,
         stderr=subprocess.STDOUT,
         stdin=subprocess.DEVNULL,

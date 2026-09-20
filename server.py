@@ -27,12 +27,47 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # 确保脚本所在目录在 sys.path（兼容 embedded Python 的 ._pth 机制不自动加脚本目录）
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import config_io   # config.json 的容错读取（用户手改的文件，写坏了不能崩）
 from course_data import CourseData, load_course, list_course_files
 from resolve_connection import ResolveConnection, timecode_to_seconds
 from equipment_config import EQUIPMENTS
 import overlay   # 借用它的「置顶」实现（同一目录，纯 Win32 小工具）
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _force_utf8_stdio():
+    """日志被重定向到文件/管道时，把 stdout/stderr 改成 UTF-8 输出。
+
+    为什么必须做，而且必须做在**模块级**：
+        launcher 把 server.py 的 stdout 重定向到 `.runtime/server.log`，并且是按
+        UTF-8 读回来的（启动失败时要弹给用户看）。但 Python 一发现 stdout 不是
+        控制台，就退回按「系统代码页」编码 —— 简体中文机器上是 GBK —— 于是中文
+        日志写进去是 GBK、读出来是乱码，用户看到的报错信息全成了问号。
+
+        坑在于：**光给子进程设 PYTHONIOENCODING=utf-8 是不够的**。实测（本机
+        Python 3.11.9）用 multiprocessing 起的 worker 子进程，环境变量明明继承到了
+        （os.environ 里就是 utf-8），sys.stdout.encoding 仍然是 gbk。所以修复放在
+        这里最保险：worker 子进程会重新执行本模块的模块级代码，这段会跟着生效，
+        父进程和子进程写出来的日志编码就一致了。
+
+    只在**非控制台**时才动：控制台输出交给 Python 自己（3.6+ 在 Windows 上走
+    WriteConsoleW，与代码页无关），拿代码页去 reconfigure 真控制台反而会把中文写坏。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if stream is None:                 # pythonw 下可能是 None
+            continue
+        try:
+            if stream.isatty():
+                continue
+            if (getattr(stream, "encoding", "") or "").lower().replace("-", "") == "utf8":
+                continue
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
+_force_utf8_stdio()
 
 
 # 器械中文名前缀映射：与 equipment_config.EQUIPMENTS 各 key 一一对应。
@@ -53,6 +88,10 @@ EQUIPMENT_PREFIX_MAP = {
 # ---------- 配置 ----------
 
 def load_config():
+    """读配置。**绝不抛异常** —— 配置文件是用户手改的，写坏了不能让插件死。
+
+    返回 (配置字典, 配置问题说明)。问题说明为空串时表示一切正常。
+    """
     cfg_path = os.path.join(BASE_DIR, "config.json")
     default = {
         # 达芬奇路径。三项都留空 = 全自动探测（推荐）。
@@ -82,10 +121,11 @@ def load_config():
         # 由 overlay.py 读取并生效，这里只是跟 config.json 保持同一份默认值。
         "always_on_top": True,
     }
-    if os.path.exists(cfg_path):
-        with open(cfg_path, "r", encoding="utf-8") as f:
-            user = json.load(f)
-        default.update(user)
+
+    # 容错读取：BOM / ANSI(GBK) / 尾逗号 / 单反斜杠路径 都会在这里被修好，
+    # 修不好也只降级成默认值 + 一条人话说明，不会让 import 阶段就崩掉。
+    user, problem, notes = config_io.load_config_file(cfg_path)
+    default.update(user)
 
     # 允许用环境变量临时改端口（跑第二个实例 / 自动化测试时用）
     env_port = os.environ.get("RESOLVE_SYNC_PORT")
@@ -98,10 +138,10 @@ def load_config():
     if dd and not os.path.isabs(dd):
         default["data_dir"] = os.path.join(BASE_DIR, dd)
 
-    return default
+    return default, problem, notes
 
 
-CONFIG = load_config()
+CONFIG, CONFIG_PROBLEM, CONFIG_NOTES = load_config()
 
 # 后端实例的自述信息，挂在 /state 和 /diag 里。
 #
@@ -115,7 +155,29 @@ SERVER_META = {
     "server_code_dir": BASE_DIR,
     "server_data_dir": os.path.abspath(CONFIG.get("data_dir") or ""),
     "server_python": sys.executable,
+    # 配置文件本身的问题（编码/语法/路径写错）。非空时悬浮窗会把它顶到状态栏，
+    # 免得用户「明明改了 config.json 却毫无反应」还以为是插件坏了。
+    "config_problem": CONFIG_PROBLEM,
+    # 已经自动处理好、不影响使用的小提醒（BOM / ANSI / 自动修复语法）
+    "config_notes": CONFIG_NOTES,
+    # 用户到底有没有在 config.json 里手填达芬奇路径。排查时很有用：
+    # 「我明明指定了目录」和「配置根本没被读进去」是两回事。
+    "config_resolve_install_dir": CONFIG.get("resolve_install_dir") or "",
+    "config_resolve_script_lib": CONFIG.get("resolve_script_lib") or "",
+    "config_resolve_script_path": CONFIG.get("resolve_script_path") or "",
 }
+
+# 配置相关的日志只在主进程打。
+# worker 子进程是用 multiprocessing spawn 起来的，会**重新执行本模块的模块级代码**，
+# 于是这些 [配置] 行会被一模一样地打印第二遍（子进程的 stdout 也是同一份
+# server.log）。配置是全进程共用的，说一遍就够了，重复行只会干扰看日志。
+if mp.current_process().name == "MainProcess":
+    if CONFIG_PROBLEM:
+        print("[配置] 有问题：%s" % CONFIG_PROBLEM.replace("\n", " / "), flush=True)
+    for _n in CONFIG_NOTES:
+        print("[配置] %s" % str(_n).replace("\n", " / "), flush=True)
+    if not os.path.isfile(os.path.join(BASE_DIR, "config.json")):
+        print("[配置] 没有 config.json，全部用默认值（自动探测达芬奇）。", flush=True)
 
 
 # ---------- 前端存活检测（关掉悬浮窗后自动退出后端） ----------
@@ -737,11 +799,25 @@ def _resolve_worker(q, module_path, lib_path):
     print(f"[worker] 启动 | module={conn.module_path} | lib={conn.lib_path}", flush=True)
 
     def _wait_msg(err: str) -> str:
-        """把连接失败原因转成前端状态栏能显示的一句人话。"""
+        """把连接失败原因转成前端状态栏能显示的一句人话。
+
+        两种失败要分开说，因为**用户能做的事完全不同**：
+          · 「文件没找到」→ 再怎么重开达芬奇都没用，得去指定路径；
+          · 「文件在但连不上」→ 才是「达芬奇没开 / 外部脚本没设 / 免费版」那一套。
+        混成一句「等待达芬奇」会让人白折腾半天。
+        """
         err = (err or "").strip()
-        if (not err) or ("返回 None" in err):
+        low = err.lower()
+
+        if ("未找到" in err or "没有找到" in err or "找不到" in err
+                or "modulenotfounderror" in low or "dll load failed" in low):
+            return ("连不上达芬奇：没找到它的接口文件（不是没开达芬奇）。"
+                    "双击「检查环境.bat」看【2】达芬奇")
+
+        if (not err) or ("返回 none" in low):
             # scriptapp("Resolve") 返回 None：最常见就是「达芬奇还没启动」
             return "正在等待达芬奇启动…（启动后插件会自动连接，无需重启插件）"
+
         first = err.splitlines()[0][:160]
         return f"正在等待达芬奇：{first}"
 

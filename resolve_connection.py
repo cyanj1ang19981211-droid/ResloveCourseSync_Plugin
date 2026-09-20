@@ -118,6 +118,10 @@ _SKIP_DIRS = frozenset((
 _MEMO = {}
 _NEG_TTL = 60.0
 
+# config.json 的读取结果说明（由 _load_config_uncached 填充）
+_CONFIG_PROBLEM = ""
+_CONFIG_NOTES = []
+
 # 本进程刚启动时环境里有没有 RESOLVE_SCRIPT_LIB（用过一次就会被我们自己赋值，
 # 所以必须在模块导入的那一刻抓下来，否则诊断信息会「自己说自己设过」）。
 _ENV_LIB_AT_IMPORT = os.environ.get("RESOLVE_SCRIPT_LIB") or ""
@@ -152,13 +156,43 @@ def forget_discovery():
 
 
 def _read_config():
-    """读 config.json；读不到/坏了都返回空字典（一切走默认值）。"""
+    """读 config.json（带容错 + 记忆化）。
+
+    走 config_io 而不是自己 json.load：用户手写的 config.json 经常是
+    带 BOM 的 UTF-8 / ANSI 编码 / 带尾逗号 / 路径只写了单反斜杠，
+    老写法一律静默返回 {}，用户就会以为「我明明指定了达芬奇目录」而实际
+    整份配置都没生效。容错之后这些都能读出来，读不出来也有一句人话说明。
+    """
+    return _memo("config", _load_config_uncached)
+
+
+def _load_config_uncached():
+    global _CONFIG_PROBLEM, _CONFIG_NOTES
     try:
-        with open(_CONFIG_FILE, "r", encoding="utf-8") as f:
-            d = json.load(f)
-        return d if isinstance(d, dict) else {}
+        import config_io
     except Exception:
-        return {}
+        # 极端情况（有人只拷了半个项目）：退回老行为，绝不因此抛异常
+        try:
+            with open(_CONFIG_FILE, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            return d if isinstance(d, dict) else {}
+        except Exception:
+            return {}
+    data, problem, notes = config_io.load_config_file(_CONFIG_FILE)
+    _CONFIG_PROBLEM, _CONFIG_NOTES = problem, notes
+    return data
+
+
+def config_problem():
+    """config.json 有没有「导致配置没生效」的问题（空串 = 没问题）。"""
+    _read_config()          # 确保已经读过一次
+    return _CONFIG_PROBLEM
+
+
+def config_notes():
+    """config.json 已经自动处理掉的小提醒（BOM / ANSI / 自动修复语法）。"""
+    _read_config()
+    return list(_CONFIG_NOTES)
 
 
 def _load_cache():
@@ -957,7 +991,55 @@ def diagnose():
         "cached": _load_cache(),
         "cache_file": _CACHE_FILE,
         "search_report": search_report(),
+        # 用户在 config.json 里到底填了什么（排查「我明明指定了目录」必备）
+        "config": _read_config(),
+        "config_problem": config_problem(),
+        "config_notes": config_notes(),
+        "configured_install_dir": _read_config().get("resolve_install_dir") or "",
+        "configured_script_lib": _read_config().get("resolve_script_lib") or "",
+        "configured_script_path": _read_config().get("resolve_script_path") or "",
     }
+
+
+def check_configured_paths():
+    """检查用户在 config.json 里手填的路径到底有没有用。
+
+    返回 (结果列表, 是否有问题)。每条结果是一句中文 + 布尔（True=有这个问题）。
+
+    「我明明在 config.json 里指定了达芬奇目录，怎么还是连不上」——这个问题
+    太常出现了，值得单列一项：填的目录里到底有没有 fusionscript.dll。
+    常见错法：填成了 Modules 目录、填成了上级目录、路径打错一个字。
+    """
+    cfg = _read_config()
+    items = []
+
+    raw_dir = cfg.get("resolve_install_dir")
+    if isinstance(raw_dir, str) and raw_dir.strip():
+        d = raw_dir.strip()
+        if not os.path.isdir(d):
+            items.append(("resolve_install_dir 填的目录不存在：%s" % d, True))
+        elif _dir_has_dll(d):
+            items.append(("resolve_install_dir 有效：%s" % d, False))
+        else:
+            items.append(("resolve_install_dir 里没有 fusionscript.dll：%s"
+                          "（是不是填成了 …\\Support\\Developer\\Scripting\\Modules？"
+                          "要填达芬奇自己的安装目录）" % d, True))
+
+    for key in ("resolve_script_lib", "resolve_script_path"):
+        raw = cfg.get(key)
+        if not (isinstance(raw, str) and raw.strip()):
+            continue
+        v = raw.strip()
+        if key == "resolve_script_lib":
+            items.append(("resolve_script_lib %s：%s"
+                          % ("有效" if os.path.isfile(v) else "文件不存在", v),
+                          not os.path.isfile(v)))
+        else:
+            ok = os.path.isfile(os.path.join(v, MODULE_NAME))
+            items.append(("resolve_script_path %s：%s"
+                          % ("有效" if ok else "目录里没有 %s" % MODULE_NAME, v), not ok))
+
+    return items, any(bad for _msg, bad in items)
 
 
 # ---------------------------------------------------------------- 连接
@@ -1068,8 +1150,14 @@ class ResolveConnection:
             # 下一次重试就能靠「运行中的进程」找到它。
             forget_discovery()
             msg = "%s: %s" % (type(e).__name__, e)
-            if "Could not locate module dependencies" in str(e) or \
-                    "DLL load failed" in str(e) or "ImportError" in type(e).__name__:
+            # 「两个文件没找齐」比具体的异常类型更能指导用户，所以只要缺文件，
+            # 就把「我找过哪些地方」的清单附上（ModuleNotFoundError 也算，
+            # 以前漏了这一类，用户只能看到一个干巴巴的 No module named ...）。
+            if (not self.module_path) or (not self.lib_path) or \
+                    "Could not locate module dependencies" in str(e) or \
+                    "DLL load failed" in str(e) or \
+                    "ImportError" in type(e).__name__ or \
+                    "ModuleNotFoundError" in type(e).__name__:
                 msg += "\n" + self._not_found_error()
             self.last_error = msg
             return False

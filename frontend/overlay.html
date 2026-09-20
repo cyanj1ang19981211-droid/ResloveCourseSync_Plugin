@@ -636,7 +636,7 @@ async function poll() {
       // 和底部那行小字；数据一回来立刻刷新。
       // 反过来（每次没拿到就整块刷成「等待达芬奇…」）会让拖时间线时满屏闪烁，
       // 什么也看不清。
-      el.status.textContent = s.message || "同步中…";
+      el.status.textContent = configWarn(s) || s.message || "同步中…";
       el.mode.textContent = "";
     } else {
       el.title.textContent = "课程强度同步";
@@ -652,7 +652,7 @@ async function poll() {
       el.next.textContent = "";
       el.metrics.innerHTML = "";
       drawCurve({ kind: "metric", times: [], main: [], sub: [], main_label: "", sub_label: "" }, null);
-      el.status.textContent = s.message || "未同步";
+      el.status.textContent = configWarn(s) || s.message || "未同步";
       el.mode.textContent = "";
     }
 
@@ -688,6 +688,23 @@ async function poll() {
     }
     // 失败时不清空已显示的数据（让画面保持上次状态，避免闪烁）
   }
+}
+
+// 配置有问题时，把原因顶到底部那行小字。
+//
+// 为什么要专门做这件事：用户最常见的困惑是「我明明在 config.json 里指定了达芬奇
+// 目录，怎么还是连不上」—— 而真实原因往往是那份配置压根没被读进去（记事本存成了
+// 带 BOM 的 UTF-8 / ANSI 编码、多了个尾逗号、路径按 Windows 习惯只写了一个反斜杠…）。
+// 把结论直接摆在他眼前，比让他去翻 .runtime/server.log 有用得多。
+// 只取第一句（状态栏是一行且会省略号截断），完整内容挂在 title 上，鼠标停上去能看全。
+function configWarn(s) {
+  const p = s && s.config_problem;
+  if (!p) {
+    if (el.status) el.status.removeAttribute("title");
+    return "";
+  }
+  el.status.title = p;
+  return "⚠ " + String(p).split("\n")[0];
 }
 
 function formatTime(sec) {

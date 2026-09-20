@@ -450,13 +450,102 @@ def check_courses():
 
 
 def _read_port():
+    """读 config.json 里的端口。
+
+    走 config_io 而不是直接 json.load：用户手改的这份文件经常带 BOM 或被存成
+    ANSI，老写法读不出来就静默退回 8765 —— 而 server.py 那边（修好之后）读出来的
+    是用户真正想要的端口，两边对不上就会「后端明明起来了，体检却说端口空闲」。
+    """
     port = 8765
     try:
-        with open(os.path.join(BASE_DIR, "config.json"), "r", encoding="utf-8") as f:
-            port = int(json.load(f).get("port") or port)
+        import config_io
+        cfg, _p, _n = config_io.load_config_file(os.path.join(BASE_DIR, "config.json"))
+        port = int(cfg.get("port") or port)
     except Exception:
         pass
     return port
+
+
+def check_config():
+    """config.json 本身：读得出来吗、用户填的路径到底有没有用。
+
+    这一项专门治「我明明在 config.json 里指定了达芬奇目录，怎么还是连不上」。
+    那句抱怨背后有两个完全不同的原因，这里一次分清：
+      · 配置压根没被读进去（记事本存成 BOM / ANSI、尾逗号、路径写成单反斜杠）；
+      · 配置读进去了，但填的目录里没有 fusionscript.dll（填成了 Modules 目录等）。
+    """
+    cfg_path = os.path.join(BASE_DIR, "config.json")
+    lines = []
+    advice = ""
+    level = OK
+
+    if not os.path.isfile(cfg_path):
+        return dict(level=OK, title="配置文件 config.json",
+                    lines=["没有这个文件（全部用默认值，达芬奇路径自动探测）"],
+                    advice="")
+
+    try:
+        import config_io
+        cfg, problem, notes = config_io.load_config_file(cfg_path)
+    except Exception as e:
+        return dict(level=WARN, title="配置文件 config.json",
+                    lines=["读取时出错：%s: %s" % (type(e).__name__, e)], advice="")
+
+    if problem:
+        level = WARN
+        lines.append("配置没有生效！" + problem.replace("\n", " "))
+        advice = (
+            "这份文件是插件唯一需要手改的地方，写坏了插件只能改用默认设置，\n"
+            "你在里面指定的达芬奇路径也就白填了。三种改法按省事排序：\n"
+            "  1) 最省事：把 config.json 直接删掉 —— 插件本来就能自动找达芬奇；\n"
+            "  2) 用记事本打开后「另存为」，编码选「UTF-8」（不要选「UTF-8 带 BOM」，\n"
+            "     更不要选 ANSI）；\n"
+            "  3) 路径里的反斜杠要写两个（D:\\\\软件\\\\达芬奇）或者干脆用正斜杠\n"
+            "     （D:/软件/达芬奇），最后一个键后面不要留逗号。\n"
+            "改完重新双击 start.bat 即可。"
+        )
+    else:
+        lines.append("格式正常（%s）" % ("UTF-8" if not notes else "已自动兼容"))
+
+    for n in notes:
+        lines.append("提示：" + str(n).replace("\n", " "))
+        if level == OK:
+            level = WARN
+            advice = ("文件能用，但建议按标准写法改一下，免得以后换电脑再踩同样的坑。")
+
+    # 实际生效的关键项
+    shown = []
+    for k, label in (("port", "端口"), ("resolve_install_dir", "达芬奇安装目录"),
+                     ("resolve_script_path", "脚本模块目录"),
+                     ("resolve_script_lib", "fusionscript.dll"),
+                     ("data_dir", "课件目录")):
+        v = cfg.get(k)
+        if v not in (None, ""):
+            shown.append("      %s = %s" % (label, v))
+    if shown:
+        lines.append("实际生效的设置：")
+        lines.extend(shown)
+    else:
+        lines.append("没有手填任何路径（达芬奇路径自动探测，这是推荐状态）")
+
+    # 手填路径到底有没有用
+    try:
+        import resolve_connection as rc
+        items, bad = rc.check_configured_paths()
+        for msg, is_bad in items:
+            lines.append(("      ✗ " if is_bad else "      ✓ ") + msg)
+            if is_bad:
+                level = WARN
+                advice = (advice + "\n" if advice else "") + (
+                    "上面填错的路径请改成达芬奇**安装目录**（里面有 Resolve.exe\n"
+                    "和 fusionscript.dll 的那个），不是它的子目录。查法：\n"
+                    "开始菜单右键「DaVinci Resolve」→ 更多 → 打开文件位置。\n"
+                    "拿不准就把这几行留空（写成 null），让插件自己找。"
+                )
+    except Exception:
+        pass
+
+    return dict(level=level, title="配置文件 config.json", lines=lines, advice=advice)
 
 
 def _port_busy(port):
@@ -545,9 +634,16 @@ def check_port():
 
 def check_files():
     """必需项目文件是否齐全（防止只拷贝了一部分文件）。"""
+    # 注意 config.json **不在**必需列表里。
+    # 没有它插件完全能跑（server.py 会打印「没有 config.json，全部用默认值（自动
+    # 探测达芬奇）」），用户删掉它、或只在需要时才创建，都是正常用法。
+    # 以前把它当必需文件，会跟【2】打架：【2】说「通过：没有这个文件（全部用
+    # 默认值）」，【8】却判「失败：缺少 config.json，请重新解压」——同一份报告
+    # 里自相矛盾，用户只能一脸问号地重新下载一遍。
     need = ["server.py", "launcher.py", "overlay.py", "course_data.py",
-            "equipment_config.py", "resolve_connection.py", "xlsx_to_json.py",
-            "convert_course.py", "probe_resolve.py", "config.json",
+            "equipment_config.py", "resolve_connection.py", "config_io.py",
+            "xlsx_to_json.py", "convert_course.py", "probe_resolve.py",
+            "env_check.py",
             os.path.join("frontend", "overlay.html")]
     missing = [f for f in need if not os.path.exists(os.path.join(BASE_DIR, f))]
     if missing:
@@ -555,8 +651,12 @@ def check_files():
             level=BAD, title="项目文件完整性",
             lines=["缺少 %d 个文件：" % len(missing)] + ["          " + m for m in missing],
             advice="文件不完整，请重新完整解压一遍下载的压缩包。")
-    return dict(level=OK, title="项目文件完整性",
-                lines=["%d 个必需文件都在" % len(need)], advice="")
+
+    lines = ["%d 个必需文件都在" % len(need)]
+    if not os.path.exists(os.path.join(BASE_DIR, "config.json")):
+        lines.append("没有 config.json —— 不影响使用，插件会用默认设置，")
+        lines.append("达芬奇路径也照常自动探测。（要手动指定时才需要建这个文件）")
+    return dict(level=OK, title="项目文件完整性", lines=lines, advice="")
 
 
 def check_portable_python():
@@ -583,7 +683,9 @@ def run_checks(include_link=True):
     慢的时候要几秒（极端情况等满 30 秒）。launcher.py 启动前的自检只想知道
     「有没有致命问题」，没必要每次都实测一遍，所以它会传 False。
     """
-    checks = [check_python, check_davinci]
+    # 顺序有讲究：配置文件排第 2 —— 「我明明指定了达芬奇目录」这类问题
+    # 现在太常见（手改 JSON 踩坑），要让人一眼看见。
+    checks = [check_python, check_config, check_davinci]
     if include_link:
         checks.append(check_resolve_link)
     checks += [check_edge, check_courses, check_port, check_files, check_portable_python]
