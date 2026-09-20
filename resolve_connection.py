@@ -386,6 +386,138 @@ _LOOKS_LIKE_EXE = re.compile(
     + re.escape(EXE_NAME), re.I)
 
 
+def _process_pids(exe_names=(EXE_NAME,)):
+    """枚举正在运行的指定进程名的 PID 列表。失败返回 []。"""
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except Exception:
+        return []
+    try:
+        k32 = ctypes.windll.kernel32
+        TH32CS_SNAPPROCESS = 0x00000002
+
+        class PROCESSENTRY32W(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.c_size_t),
+                ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", ctypes.c_long),
+                ("dwFlags", wintypes.DWORD),
+                ("szExeFile", wintypes.WCHAR * 260),
+            ]
+
+        k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        k32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        k32.Process32FirstW.argtypes = [wintypes.HANDLE,
+                                        ctypes.POINTER(PROCESSENTRY32W)]
+        k32.Process32NextW.argtypes = [wintypes.HANDLE,
+                                       ctypes.POINTER(PROCESSENTRY32W)]
+
+        want = {n.lower() for n in exe_names}
+        snap = k32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        if not snap or snap == wintypes.HANDLE(-1).value:
+            return []
+        pids = []
+        try:
+            entry = PROCESSENTRY32W()
+            entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+            ok = k32.Process32FirstW(snap, ctypes.byref(entry))
+            while ok:
+                if (entry.szExeFile or "").lower() in want:
+                    pid = int(entry.th32ProcessID)
+                    if pid not in pids:
+                        pids.append(pid)
+                ok = k32.Process32NextW(snap, ctypes.byref(entry))
+        finally:
+            k32.CloseHandle(snap)
+        return pids
+    except Exception:
+        return []
+
+
+def _process_window_titles(exe_names=(EXE_NAME,)):
+    """取指定进程所有顶层窗口的标题。失败返回 []。
+
+    为什么需要：**免费版还是 Studio，只有窗口标题写得明白**。
+    版本资源里两者都叫 "DaVinci Resolve"，安装目录也同名，从文件上看不出来；
+    但 Studio 版的主窗口标题是「… - DaVinci Resolve Studio」，免费版没有
+    "Studio" 字样。这是目前唯一能从外部读到的版别线索。
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except Exception:
+        return []
+    pids = _process_pids(exe_names)
+    if not pids:
+        return []
+    try:
+        u32 = ctypes.windll.user32
+        u32.EnumWindows.argtypes = [ctypes.c_void_p, wintypes.LPARAM]
+        u32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+        u32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+        u32.GetWindowThreadProcessId.argtypes = [
+            wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+
+        titles = []
+        want = set(pids)
+
+        @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        def _cb(hwnd, _lparam):
+            pid = wintypes.DWORD()
+            u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if int(pid.value) in want:
+                ln = u32.GetWindowTextLengthW(hwnd)
+                if ln > 0:
+                    buf = ctypes.create_unicode_buffer(ln + 2)
+                    u32.GetWindowTextW(hwnd, buf, ln + 2)
+                    t = (buf.value or "").strip()
+                    if t and t not in titles:
+                        titles.append(t)
+            return True
+
+        u32.EnumWindows(_cb, 0)
+        return titles
+    except Exception:
+        return []
+
+
+_DAVINCI_TITLE = re.compile(r"DaVinci\s*Resolve", re.I)
+_DAVINCI_STUDIO_TITLE = re.compile(r"DaVinci\s*Resolve\s*Studio", re.I)
+
+
+def resolve_edition():
+    """判断**正在运行**的达芬奇是 Studio 还是免费版。
+
+    返回 (edition, evidence)：
+      edition  —— "studio" / "free" / ""（判断不出来，比如达芬奇没开）
+      evidence —— 用来判断的窗口标题，方便写进报告让人自己复核
+
+    注意：达芬奇 19.1 之后「从外部进程调用脚本」是 Studio 专属能力，
+    免费版 ``scriptapp("Resolve")`` 恒返回 None，改什么设置都没用。
+    以前只能让用户自己去看「帮助 -> 关于」，这里算是把这一步自动化了。
+    """
+    titles = _process_window_titles()
+    if not titles:
+        return "", ""
+    # 主窗口标题最长（形如「未命名项目* - DaVinci Resolve Studio」）；
+    # 项目管理器那种窗口标题里没有产品名，会被下面的正则过滤掉。
+    best = ""
+    for t in titles:
+        if _DAVINCI_TITLE.search(t) and len(t) > len(best):
+            best = t
+    if not best:
+        return "", ""
+    if _DAVINCI_STUDIO_TITLE.search(best):
+        return "studio", best
+    return "free", best
+
+
 def _shortcut_locations():
     """返回「可能放达芬奇快捷方式」的目录（开始菜单 / 桌面 / 任务栏固定）。"""
     out = []

@@ -233,20 +233,35 @@ set one of the three keys above:
 To find that directory: right-click "DaVinci Resolve" in the Start Menu → More →
 Open file location.
 
+Note the **double quotes around the value** — a JSON string always needs them. Leaving them
+out (`"resolve_install_dir": D:/Software/DaVinci`) is the single most common hand-edit slip
+and it now repairs itself, but it is better to write it right.
+
 **Path syntax / encoding:** use **forward slashes** (`D:/Software/DaVinci`) and you never
 have to think about escaping; if you prefer backslashes, write **two** (`"D:\\Software\\DaVinci"`).
 `config.json` is read through `config_io.py`, which tolerates the usual Notepad damage —
-UTF-8 **BOM**, **ANSI/GBK** encoding, a trailing comma, `//` comments, and single-backslash
-paths (it also undoes the silent `\t`/`\n`/`\b` escape corruption that makes `D:\tools\...`
-unmatchable). Anything auto-fixed is reported as a note. If the file is broken beyond repair
-the backend **still starts** with defaults and shows *"config.json has a syntax error
-(line N)"* in the overlay status bar and in the health report — instead of dying at import
-time, which used to look exactly like *"the overlay just keeps saying waiting for DaVinci"*.
+UTF-8 **BOM**, **ANSI/GBK** encoding, a trailing comma, `//` comments, an **unquoted value**,
+and single-backslash paths (it also undoes the silent `\t`/`\n`/`\b` escape corruption that
+makes `D:\tools\...` unmatchable). Anything auto-fixed is reported as a note. If the file is
+broken beyond repair the backend **still starts** with defaults and shows *"config.json has a
+syntax error (line N)"* in the overlay status bar and in the health report — instead of dying
+at import time, which used to look exactly like *"the overlay just keeps saying waiting for
+DaVinci"*.
 
 > **Unzipping to `D:\` (or any other drive) is not a problem.** Every path is resolved
 > relative to the plugin folder. "Waiting for DaVinci…" is always a Resolve-side issue:
-> external scripting not set to *Local* + Resolve not fully restarted, the free (non-Studio)
-> build, `fusionscript.dll` not found, or a timeline name that does not match a course name.
+> the free (non-Studio) build, external scripting not set to *Local* + Resolve not fully
+> restarted, `fusionscript.dll` not found, security software blocking Resolve's local script
+> channel, or a timeline name that does not match a course name.
+
+**The health check now answers these by itself.** Item 【3】 reads the *window title* of the
+running Resolve to tell **Studio from the free edition** (only Studio's title contains
+"Studio") and prints the **full path of the actually running `Resolve.exe`**, flagging it
+when that is not the copy the plugin picked — a case that is otherwise invisible when two
+Resolve installations coexist. Item 【4】, when the live connection fails, lists the
+registered security software and quotes Resolve's own log line
+(*`Failed to connect to script server`*), which means the request arrived but Resolve's local
+script channel never came up — a restart of Resolve, or a whitelist entry, is what fixes it.
 
 ## Data Format
 
@@ -361,6 +376,7 @@ elliptical 3 / bodyweight 5).
 
 This project follows [Semantic Versioning](https://semver.org/).
 
+- **v0.6.0** — **A hand-edited `config.json` can no longer kill the plugin, and the health report stops guessing.** (1) New `config_io.py`: UTF-8-with-BOM, ANSI/GBK, trailing commas, `//` comments, an **unquoted value**, and single-backslash paths (including the silent `\t`/`\n`/`\b` escape corruption) are all repaired automatically; what cannot be repaired degrades to defaults and surfaces *"config.json has a syntax error (line N)"* in the overlay status bar, where the old version simply crashed the backend — which looked exactly like *"waiting for DaVinci…"* even though the path had been filled in. (2) Health item 【3】 now reads the Resolve **window title** to tell the free edition from Studio (only Studio's title says "Studio") and prints the **full path of the running `Resolve.exe`**, failing outright when that is not the copy the plugin picked — previously invisible when two installs coexist. (3) Health item 【4】, on a failed connection, lists the registered security software and quotes Resolve's own log line *"Failed to connect to script server"* — the request arrived, Resolve's internal script channel did not come up; unrelated to which drive the plugin lives on or which Python it uses. Also fixes garbled Chinese in the `start.bat` failure dialog (`PYTHONIOENCODING` does not reach `multiprocessing` workers; the fix moved into `server.py` at module level).
 - **v0.5.0** — **"It won't connect / won't sync" is no longer guesswork:** the environment check gained item **[3] "live Resolve connection test"** (spawns a subprocess that really calls `scriptapp("Resolve")` and reports the current project / timeline / whether a course matches), the port check now asks the running backend what *it* sees, and the backend gained a `/diag` endpoint plus self-reported instance info (PID, start time, code dir, data dir) so a stale instance from *another folder* is obvious. Also documents the key prerequisite that **external scripting is Studio-only since Resolve 19.1** (the free edition cannot work).
 - **v0.4.1** — **Works no matter where Resolve is installed:** previously only a few hard-coded install directories were recognised, and the official `DaVinciResolveScript.py` hard-codes `C:\Program Files\Blackmagic Design\DaVinci Resolve\` for `fusionscript.dll`, so an install on `D:\Software\DaVinci` or `E:\Davinci` could never connect. The plugin now searches in order: running Resolve process → Windows Installer-registered install directories → Start Menu/Desktop shortcuts → common directories on every drive → a depth- and time-limited disk scan, and caches the hit in `.runtime/resolve_paths.json`. Leftover copies of Resolve are disambiguated by the registry-recorded version; the environment report lists every directory tried and how many installs exist; Edge is now located via the registry instead of hard-coded paths. Also fixes two related bugs: "start the plugin before Resolve" could get stuck forever if the DLL was not found at startup, and the not-found error gave no clue about where it had looked.
 - **v0.4.0** — **No more guesswork on a fresh machine:** every `.bat` is now ASCII-only (fixes the garbled "*is not recognized as an internal or external command*" errors seen on another machine); added `检查环境.bat` + `env_check.py` environment check with a Chinese report; `start.bat` no longer fails silently (opens `SETUP-GUIDE.txt` when Python is missing, shows a Chinese message box on startup errors); portable Python support (`runtime\python\`) for machines without admin rights; added `check_bat.py` as a regression guard.

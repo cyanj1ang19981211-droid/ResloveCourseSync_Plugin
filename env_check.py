@@ -116,6 +116,128 @@ def _resolve_running():
     return "Resolve.exe" in _run_quiet(["tasklist", "/FI", "IMAGENAME eq Resolve.exe", "/NH"])
 
 
+def _running_exe_paths():
+    """正在运行的 Resolve.exe 完整路径列表。
+
+    「达芬奇正在运行」这句话不够用 —— 电脑上装了两份达芬奇时，到底是哪一份在跑
+    才是关键。以前报告只说「正在运行」，用户和自己装的那份一对照才发现根本不是
+    同一个，白折腾半天。
+    """
+    try:
+        import resolve_connection as rc
+        return [p for p in rc._process_exe_paths() if p]
+    except Exception:
+        return []
+
+
+def resolve_edition():
+    """正在运行的达芬奇是 Studio 还是免费版。返回 (edition, evidence)。"""
+    try:
+        import resolve_connection as rc
+        return rc.resolve_edition()
+    except Exception:
+        return "", ""
+
+
+def _security_software():
+    """列出本机装了哪些杀毒/终端安全软件。
+
+    外部脚本连不上达芬奇时，「安全软件挡掉了本机内部的脚本通道」是很常见的一条，
+    而用户几乎想不到。这里读 Windows 安全中心登记的杀毒产品名，不碰别的。
+
+    读注册表而不是跑 wmic：Windows 11 已经移除 wmic（实测新版上直接不可用），
+    注册表这条在 Win7 ~ Win11 都在。
+    """
+    names = []
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                            r"SOFTWARE\Microsoft\Security Center\Provider\Av") as k:
+            for i in range(winreg.QueryInfoKey(k)[0]):
+                try:
+                    guid = winreg.EnumKey(k, i)
+                    with winreg.OpenKey(k, guid) as kk:
+                        for j in range(winreg.QueryInfoKey(kk)[1]):
+                            nm, val, _ = winreg.EnumValue(kk, j)
+                            if nm.lower() in ("displayname", "productname"):
+                                v = str(val).strip()
+                                if v and v not in names:
+                                    names.append(v)
+                except OSError:
+                    continue
+    except OSError:
+        pass
+    return names
+
+
+def _third_party_av():
+    """第三方安全软件（排除系统自带的 Defender，它不是这里的怀疑对象）。"""
+    return [n for n in _security_software() if "defender" not in n.lower()]
+
+
+def _resolve_log_hint():
+    """去达芬奇自己的日志里找「脚本服务器连不上」的证据。
+
+    连不上的时候，达芬奇会把它那边的看法写进 davinci_resolve.log，例如：
+
+        Started script server: 46492
+        Failed to connect to script server, retrying
+        ...
+        RemoteApp::Connect - ioctlsocket(block) err 1
+        HostApp destroy
+
+    这几行非常有价值：它说明「达芬奇收到了请求，但本机通信被挡了」—— 跟免费版、
+    跟路径找没找到都无关。把这段人话报出来，用户就不用自己去翻日志。
+
+    返回 (结论, 原文片段)；什么都没查到时返回 ("", "")。
+    """
+    base = os.path.join(os.environ.get("APPDATA") or "", "Blackmagic Design",
+                        "DaVinci Resolve", "Support", "logs")
+    if not os.path.isdir(base):
+        return "", ""
+    try:
+        logs = [os.path.join(base, f) for f in os.listdir(base)
+                if f.lower().endswith(".log")]
+        logs = [p for p in logs if os.path.isfile(p)]
+        if not logs:
+            return "", ""
+        newest = max(logs, key=os.path.getmtime)
+        with open(newest, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - 200000))       # 只看末尾 200KB，够最近几次了
+            raw = f.read().decode("utf-8", "replace")
+    except Exception:
+        return "", ""
+
+    if "Failed to connect to script server" not in raw:
+        return "", ""
+    # 取最后一次出现的上下文
+    idx = raw.rfind("Failed to connect to script server")
+    tail = raw[max(0, idx - 400):idx + 400]
+    detail = "ioctlsocket" in tail
+    evidence = ""
+    for line in raw[idx:idx + 600].splitlines()[:6]:
+        evidence += line.strip() + "\n"
+    return (
+        "达芬奇自己的日志里写着「Failed to connect to script server」"
+        + ("（伴随 ioctlsocket 报错）" if detail else "")
+        + "：\n"
+        "  这句话是**达芬奇自己**说的，不是插件说的。意思是：连接请求到了，\n"
+        "  但达芬奇本机内部的脚本通道没能建立起来 —— 所以这跟插件放在哪个盘、\n"
+        "  用哪个 Python 都没关系。\n"
+        "  按这个顺序试：\n"
+        "    a) 彻底退出达芬奇（任务管理器里确认 Resolve.exe 没了）再重新打开；\n"
+        "       达芬奇的脚本服务偶尔会卡在坏状态，重启一次最常见、最省事。\n"
+        "    b) 确认 偏好设置 -> 系统 -> 常规 ->「外部脚本使用」= 本地(Local)。\n"
+        "    c) 安全软件把达芬奇的脚本通道挡了（单位统一装的终端防护、360、火绒\n"
+        "       等都干过这事）。把插件目录和达芬奇安装目录加进白名单；单位发的\n"
+        "       软件要找 IT 放行。\n"
+        "  日志文件：" + newest,
+        evidence.strip()
+    )
+
+
 def _resolve_exe():
     """找出达芬奇主程序的完整路径。
 
@@ -252,28 +374,76 @@ def check_davinci():
                       "那一份。如果确认用错了，把不用的旧目录删掉/改名，或者干脆把达芬奇\n"
                       "重装一次，问题即可消失。")
 
+    # 进程是否在跑、**到底哪一份在跑**（没开达芬奇也能用插件，只是没数据）
+    running_exes = _running_exe_paths()
+    running = bool(running_exes) or _resolve_running()
+    if running_exes:
+        lines.append("运行状态：达芬奇正在运行，进程路径：")
+        for p in running_exes:
+            v = _file_version(p)
+            lines.append("          %s%s" % (p, ("  v" + v) if v else ""))
+
+        # 「正在跑的那份」和「插件选用的那份」不是同一个目录 → 必然连不上，
+        # 而两份的版本号在报告里看着都挺正常，最容易被忽略。必须点破。
+        used_dir = os.path.normcase(os.path.dirname(lib)) if lib else ""
+        wrong = [p for p in running_exes
+                 if used_dir and os.path.normcase(os.path.dirname(p)) != used_dir]
+        if wrong:
+            level = BAD
+            lines.append("          ⚠ 正在运行的不是插件选用的那一份：")
+            lines.append("            插件选用：" + os.path.dirname(lib))
+            advice = (
+                "这台电脑上有两份（或更多）达芬奇，插件挑的那份和你**实际打开**的\n"
+                "那份不是同一个目录 —— 版本对不上，插件必然连不上。\n"
+                "\n怎么办（选一个）：\n"
+                "  1) 把不用的那份卸载掉，或者把它的目录改个名，只留一份；或者\n"
+                "  2) 直接告诉插件用哪一份 —— 在 config.json 里写：\n"
+                '        "resolve_install_dir": "%s"\n'
+                "     （注意路径要用英文双引号包起来，反斜杠写成 / 或 \\\\）\n"
+                % os.path.dirname(wrong[0]).replace("\\", "/"))
+    else:
+        lines.append("运行状态：达芬奇当前没开（插件会等它启动）")
+        if level == OK:
+            level = WARN
+            advice = ("达芬奇现在没开 —— 这不影响启动插件，但悬浮窗会先显示等待状态。\n"
+                      "打开达芬奇并载入时间线后会自动接上。")
+
     # 达芬奇主程序在哪、什么版本（版本号很关键：19.1 之后外部脚本只给 Studio 用）
     exe = _resolve_exe()
-    if exe:
+    running_set = set(os.path.normcase(p) for p in running_exes)
+    if exe and os.path.normcase(exe) not in running_set:
         ver = _file_version(exe)
         lines.append("主程序　：" + exe)
         if ver:
             lines.append("版本　　：" + ver)
 
-    # 进程是否在跑（没开达芬奇也能用插件，只是没数据）
-    running = _resolve_running()
-    lines.append("运行状态：" + ("达芬奇正在运行" if running else "达芬奇当前没开（插件会等它启动）"))
-    if not running and level == OK:
-        level = WARN
-        advice = ("达芬奇现在没开 —— 这不影响启动插件，但悬浮窗会先显示等待状态。\n"
-                  "打开达芬奇并载入时间线后会自动接上。")
+    # 免费版还是 Studio —— 只有窗口标题写得明白，而它决定了「外部脚本能不能用」。
+    # 达芬奇 19.1 之后，从外部进程调脚本是 Studio 专属；免费版恒返回 None，
+    # 改任何设置都没用。能自动看出来，就不用让用户去翻「帮助 -> 关于」了。
+    edition, evidence = resolve_edition()
+    if edition == "studio":
+        lines.append("版本类型：DaVinci Resolve Studio（付费版，支持外部脚本）")
+    elif edition == "free":
+        lines.append("版本类型：看起来是免费版（窗口标题里没有 Studio 字样）")
+        lines.append("          判断依据（窗口标题）：" + evidence)
+        lines.append("          ⚠ 达芬奇 19.1 之后，从外部程序调用脚本是 Studio 的专属功能。")
+        lines.append("            免费版只能在达芬奇里用「工作区 -> 脚本」菜单跑脚本，")
+        lines.append("            插件这类外部工具一律连不上，改设置也没用。")
+        lines.append("          → 请打开达芬奇「帮助 -> 关于」确认：写着 Studio 才是付费版。")
+        if level == OK:
+            level = WARN
+        if not advice:
+            advice = ("这台电脑上的达芬奇看起来是免费版，而免费版不支持外部脚本 ——\n"
+                      "这正是插件一直「等待达芬奇」的原因。\n"
+                      "确认：达芬奇菜单「帮助 -> 关于」里写着 Studio 才是付费版。\n"
+                      "办法：换用 Studio（付费版）才行。")
 
     return dict(level=level, title="达芬奇（DaVinci Resolve）", lines=lines, advice=advice)
 
 
 # 连不上达芬奇时统一给这份排查清单（按可能性从高到低）
 _LINK_ADVICE = (
-    "1) 装的是免费版吗？—— 这是最常见的原因，先确认这一条。\n"
+    "1) 装的是免费版吗？—— 最常见的一条，先确认。\n"
     "   达芬奇 19.1 之后，「外部进程」调用脚本被限制为 Studio（付费版）专属：\n"
     "   免费版只能在「工作区 -> 脚本」菜单里跑脚本，外部程序一律连不上，\n"
     "   改任何设置都没用。确认办法：打开达芬奇 -> 菜单「帮助 / Help」->「关于」，\n"
@@ -281,16 +451,25 @@ _LINK_ADVICE = (
     "   如果是免费版：这个插件（以及所有外部脚本工具）都用不了，\n"
     "   要升级到 Studio 才可以。\n"
     "\n"
-    "2) 改完设置要重启达芬奇。\n"
+    "2) 彻底重启一次达芬奇 —— 最常见、也最省事的一条。\n"
+    "   任务管理器里确认 Resolve.exe 已经完全没了（不是关窗口），再重新打开。\n"
+    "   达芬奇的脚本服务偶尔会卡在坏状态，重启一次就好了。\n"
+    "\n"
+    "3) 确认设置并重启。\n"
     "   偏好设置 -> 系统 -> 常规 -> 「外部脚本使用 / External scripting using」\n"
     "   设为「本地 / Local」，然后「完全退出达芬奇再重新打开」（不重启常常不生效）。\n"
     "\n"
-    "3) 达芬奇里要先打开一个工程，并且停在「剪辑 / Edit」页（有时间线）。\n"
+    "4) 安全软件拦截本机通信 —— 公司电脑上很常见，而且最难想到。\n"
+    "   终端防护 / 杀毒软件（单位统一装的终端安全、360、火绒、卡巴斯基…）的\n"
+    "   「网络防护 / 进程防护 / 行为防护」会挡掉达芬奇在本机内部的脚本通道，\n"
+    "   表现就是：文件都在、设置也对、达芬奇也开着，就是连不上。\n"
+    "   判断办法：达芬奇自己的日志里会写「Failed to connect to script server」。\n"
+    "   处理办法：把插件所在文件夹、以及达芬奇安装目录加进安全软件白名单；\n"
+    "   或者临时关掉「网络防护」再试一次。公司统一装的防护软件需要找 IT 放行。\n"
     "\n"
-    "4) 安全软件拦截。把插件所在文件夹加进杀毒软件白名单，或临时关掉\n"
-    "   「脚本防护 / 勒索防护」再试一次。\n"
+    "5) 达芬奇里要先打开一个工程，并且停在「剪辑 / Edit」页（有时间线）。\n"
     "\n"
-    "5) 确认插件用的是本机的 Python 3.10/3.11（本报告里「Python 解释器」\n"
+    "6) 确认插件用的是本机的 Python 3.10/3.11（本报告里「Python 解释器」\n"
     "   那一项通过就说明没问题）。\n"
 )
 
@@ -366,7 +545,51 @@ def check_resolve_link():
             return dict(level=WARN, title=title, lines=lines,
                         advice=("达芬奇现在没开，所以连不上 —— 这不影响启动插件。\n"
                                 "要测连接的话：先打开达芬奇、新建或载入一个工程，再跑一次体检。"))
-        return dict(level=BAD, title=title, lines=lines, advice=_LINK_ADVICE)
+
+        # 两条能一锤定音的证据，比让用户去挨个试快得多：
+        #   ① 版别 —— 免费版直接没戏，改设置也白改；
+        #   ② 达芬奇自己的日志 —— 它写下「脚本服务器连不上」时，问题不在路径，
+        #      而在本机通信被挡（十有八九是安全软件）。
+        edition, ev_title = resolve_edition()
+        if edition == "free":
+            lines.append("版本类型：免费版（窗口标题：" + ev_title + "）")
+            return dict(level=BAD, title=title, lines=lines, advice=(
+                "查出来了：这台电脑上跑的达芬奇是**免费版**。\n"
+                "\n"
+                "达芬奇 19.1 之后，从外部程序调用脚本是 Studio（付费版）的专属功能。\n"
+                "免费版只能在达芬奇里用「工作区 -> 脚本」菜单跑脚本，插件这类外部\n"
+                "工具一律连不上 —— 跟路径、设置都没关系，改什么都没用。\n"
+                "\n"
+                "判断依据是达芬奇主窗口标题：" + ev_title + "\n"
+                "（可再核对一次：达芬奇菜单「帮助 -> 关于」，写着 Studio 才是付费版。）\n"
+                "\n"
+                "办法只有换用 Studio。如果确认同事装的就是 Studio，请把这份报告发回来。"))
+
+        hint, evidence = _resolve_log_hint()
+        third = _third_party_av()
+        level = BAD
+        blame = ""
+        if third:
+            lines.append("本机安全软件：" + "、".join(third))
+            blame = ("本机装了这些安全软件：%s\n"
+                     "达芬奇在本机内部通信时，安全软件的「网络防护 / 进程防护」是最\n"
+                     "常见的拦路虎之一。如果「重启达芬奇」和「外部脚本 = 本地」都排除\n"
+                     "了，它们就是重点怀疑对象：把插件目录和达芬奇安装目录加进白名单；\n"
+                     "单位统一装的防护软件要找 IT 放行。\n"
+                     % "、".join(third))
+
+        if hint:
+            lines.append("")
+            lines.append("【达芬奇自己日志的说法】")
+            for l in evidence.splitlines()[:6]:
+                lines.append("          " + l.strip()[:110])
+            head = (blame + "\n" if blame else "")
+            return dict(level=level, title=title, lines=lines,
+                        advice=head + hint + "\n\n——————\n\n" + _LINK_ADVICE)
+
+        head = (blame + "\n——————\n\n") if blame else ""
+        return dict(level=level, title=title, lines=lines,
+                    advice=head + _LINK_ADVICE)
 
     # ---- 连上了 ----
     lines = ["连接结果：成功"]
@@ -500,8 +723,11 @@ def check_config():
             "  1) 最省事：把 config.json 直接删掉 —— 插件本来就能自动找达芬奇；\n"
             "  2) 用记事本打开后「另存为」，编码选「UTF-8」（不要选「UTF-8 带 BOM」，\n"
             "     更不要选 ANSI）；\n"
-            "  3) 路径里的反斜杠要写两个（D:\\\\软件\\\\达芬奇）或者干脆用正斜杠\n"
-            "     （D:/软件/达芬奇），最后一个键后面不要留逗号。\n"
+            "  3) 整条路径要用英文双引号包起来 —— 写成\n"
+            '         "resolve_install_dir": "D:/软件/达芬奇",\n'
+            "     最容易漏的就是这对引号（漏了 JSON 完全看不懂，插件只能改用默认设置）。\n"
+            "     路径里的反斜杠要写两个（D:\\\\软件\\\\达芬奇）或干脆用正斜杠（D:/软件/达芬奇），\n"
+            "     最后一个键后面不要留逗号。\n"
             "改完重新双击 start.bat 即可。"
         )
     else:

@@ -16,6 +16,11 @@ config.json 是**用户唯一需要手改的文件**，而 Windows 上「用记�
    server.py 崩；而 resolve_connection 那份是 try/except 静默吞掉 →
    **用户以为自己指定了达芬奇目录，其实整份配置都被丢弃了**，连端口都回默认值。
 4. 多写一个尾逗号、写 ``//`` 注释 → json 报错，同上。
+5. **最像「手滑」的一种：值忘加引号** ——
+   ``"resolve_install_dir": C:\\Program Files\\Blackmagic Design\\DaVinci Resolve,``
+   JSON 里所有字符串都必须带英文双引号，光写成 Windows 路径的样子 json 完全不认，
+   报 ``Expecting value: line 2 column ...``。人眼扫过去却觉得「我明明填了啊」，
+   所以这一条也在下面自动补引号。
 
 更阴险的是「看起来能跑但其实错了」：路径里如果出现 ``\\t`` ``\\n`` ``\\b``
 这类**合法**转义（``D:\\tools``、``D:\\new``、``D:\\bin``），json 不会报错，
@@ -54,6 +59,10 @@ _CTRL_BACK = {
     "\f": "\\f",
     "\r": "\\r",
 }
+
+# JSON 里可以裸写的值（不加引号也是合法的）
+_BARE_KEYWORDS = ("true", "false", "null")
+_NUM_RE = re.compile(r"^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$")
 
 
 # ---------------------------------------------------------------- 解码
@@ -97,8 +106,9 @@ def read_text(path):
 def repair_json_text(text):
     """尽最大努力把「不像标准 JSON 但人看着对」的文本修成标准 JSON。
 
-    返回 (新文本, 修复说明列表)。只处理三类最常见的手写错误：
+    返回 (新文本, 修复说明列表)。只处理四类最常见的手写错误：
       · 字符串里的非法反斜杠（Windows 路径）→ 补成字面反斜杠
+      · 值忘加引号（``: C:\\Program Files\\...``）→ 补上引号并把反斜杠转义好
       · 注释 // 和 /* */  → 删掉
       · 多余尾逗号 → 删掉
     """
@@ -108,11 +118,18 @@ def repair_json_text(text):
     n = len(text)
     in_str = False
     escaped_bs = 0
+    # 刚读完一个键的冒号，下一个词就是它的值 —— 值没加引号的话在这里补救
+    expect_value = False
 
     while i < n:
         c = text[i]
 
         if not in_str:
+            if c in " \t\r\n":
+                out.append(c)
+                i += 1
+                continue
+
             # --- 注释 ---
             if c == "/" and i + 1 < n and text[i + 1] == "/":
                 j = text.find("\n", i)
@@ -129,9 +146,31 @@ def repair_json_text(text):
 
             if c == '"':
                 in_str = True
+                expect_value = False
                 out.append(c)
                 i += 1
                 continue
+
+            # --- 值没加引号 ---
+            #     {"resolve_install_dir": C:\Program Files\...}
+            #     合法的裸值（true / false / null / 数字 / { / [ / -）原样放过，
+            #     其余（基本就是 Windows 路径）整段读出来加引号，反斜杠交给
+            #     json.dumps 正确转义 —— 这样 "D:\temp" 也不会被吃成制表符。
+            if expect_value:
+                expect_value = False
+                if c not in "{[-\t\r\n" and not c.isdigit():
+                    j = i
+                    while j < n and text[j] not in ",}]\r\n":
+                        j += 1
+                    tok = text[i:j].strip()
+                    if tok and tok not in _BARE_KEYWORDS and not _NUM_RE.match(tok):
+                        out.append(json.dumps(tok, ensure_ascii=False))
+                        if "值没加引号" not in fixes:
+                            fixes.append(
+                                "有值没有用英文双引号包起来（路径必须写成 "
+                                '"D:/软件/达芬奇" 或 "D:\\\\软件\\\\达芬奇"）')
+                        i = j
+                        continue
 
             # --- 尾逗号：跳过空白后紧跟 } 或 ] ---
             if c == ",":
@@ -143,7 +182,11 @@ def repair_json_text(text):
                     if "多余的尾逗号" not in fixes:
                         fixes.append("多余的尾逗号")
                     continue
+                out.append(c)
+                i += 1
+                continue
 
+            expect_value = (c == ":")
             out.append(c)
             i += 1
             continue
