@@ -588,7 +588,8 @@ async function poll() {
     if (s.course_loaded) {
       hasData = true;
       el.title.textContent = (s.title || s.course_name) + " · " + s.timeline_name;
-      el.segment.textContent = s.segment || "—";
+      // 播放头走过课件结尾时别只留一个「—」：用户会以为插件抓不到课件。
+      el.segment.textContent = s.segment || (s.over_end ? "课件已结束" : "—");
       el.segment.className = "segment" + (s.segment ? "" : " empty");
       el.action.textContent = s.action || "";
       if (s.keyword) {
@@ -626,8 +627,18 @@ async function poll() {
       const mode = s.mode || "?";
       const modeIcon = mode === "raw" ? "●" : mode === "外推" ? "◐" : "○";
       const modeColor = mode === "raw" ? "var(--green)" : mode === "外推" ? "var(--amber)" : "var(--muted)";
-      el.status.textContent = "已同步 · " + formatTime(s.time_seconds);
-      el.mode.textContent = modeIcon + " " + mode;
+      // 达芬奇的播放头时间码是**绝对**的（时间线起点在哪儿就从哪儿数），而课件数据
+      // 永远从 0 秒记起 —— 后端已经减掉了时间线起始时间码。起点不是 00:00:00:00 的
+      // 时间线（没勾「使用项目设置」新建的那种，媒体池里带小齿轮）就属于这种情况，
+      // 这里把"已按起点对齐"显示出来，免得用户怀疑进度不准。
+      const base = s.timeline_start_tc || "";
+      const aligned = !!base && base !== "00:00:00:00";
+      el.status.title = (s.timecode ? ("达芬奇播放头 " + s.timecode + "；") : "")
+        + (aligned ? ("时间线起点 " + base + "，进度已按起点对齐") : "");
+      el.status.textContent = s.over_end
+        ? "已同步 · 课件已结束"
+        : "已同步 · " + formatTime(s.time_seconds);
+      el.mode.textContent = modeIcon + " " + mode + (aligned ? " · 起点对齐" : "");
       el.mode.style.color = modeColor;
     } else if (hasData) {
       // 之前已经显示过课程数据，只是这一次没拿到 —— 典型场景：拖动时间线时

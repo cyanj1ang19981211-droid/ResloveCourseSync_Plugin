@@ -113,6 +113,25 @@ def probe():
         out["timecode"] = str(_safe(lambda: tl.GetCurrentTimecode(), "")) if tl else ""
         out["timeline_count"] = int(_safe(lambda: len(tl.GetTrackCount("video") or []), 0)) if tl else 0
 
+        # 时间线起点 + 是不是「不用项目设置」的自定义设置（媒体池里带小齿轮的那种）。
+        # 这两个是「那种时间线抓不到课件」的关键：起点不是 00:00:00:00 时，播放头
+        # 时间码不能直接当"课件里的第几秒"用，必须先减掉起点。
+        out["start_timecode"] = str(_safe(lambda: tl.GetStartTimecode(), "")) if tl else ""
+        raw_custom = _safe(lambda: tl.GetSetting("useCustomSettings"), "") if tl else ""
+        out["custom_settings"] = str(raw_custom)
+        try:
+            out["fps"] = float(_safe(lambda: tl.GetSetting("timelineFrameRate"), 0) or 0)
+        except (TypeError, ValueError):
+            out["fps"] = 0.0
+
+        # 播放头换算成「相对时间线起点的秒」—— 插件运行时用的就是这个值
+        try:
+            from resolve_connection import relative_seconds
+            out["rel_seconds"] = relative_seconds(
+                out["timecode"], out["start_timecode"], out["fps"] or 25.0)
+        except Exception:
+            out["rel_seconds"] = 0.0
+
         # ---- 3) 自检：这条时间线能不能匹配到课件 ----
         # 直接复用 server.py 里的 CourseManager，保证「体检说的匹配结果」和
         # 「插件运行时的匹配结果」是同一套逻辑，不会两边说法不一样。

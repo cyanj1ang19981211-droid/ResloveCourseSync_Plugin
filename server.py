@@ -17,11 +17,13 @@
 
 import json
 import os
+import socket
 import subprocess
 import sys
 import threading
 import multiprocessing as mp
 import time
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # 确保脚本所在目录在 sys.path（兼容 embedded Python 的 ._pth 机制不自动加脚本目录）
@@ -29,11 +31,22 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import config_io   # config.json 的容错读取（用户手改的文件，写坏了不能崩）
 from course_data import CourseData, load_course, list_course_files
-from resolve_connection import ResolveConnection, timecode_to_seconds
+from resolve_connection import ResolveConnection, timecode_to_seconds, relative_seconds
 from equipment_config import EQUIPMENTS
+from version import VERSION
 import overlay   # 借用它的「置顶」实现（同一目录，纯 Win32 小工具）
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+RUNTIME_DIR = os.path.join(BASE_DIR, ".runtime")
+SERVER_JSON = os.path.join(RUNTIME_DIR, "server.json")
+
+# 谁把我拉起来的（launcher 会通过环境变量告诉我）。
+# 用来做「父进程死了我也死」的看门狗：launcher 被强杀 / 崩溃时，后端不会变成
+# 看不见的僵尸进程继续占着端口。
+try:
+    PARENT_PID = int(os.environ.get("RESOLVE_SYNC_PARENT_PID") or 0)
+except ValueError:
+    PARENT_PID = 0
 
 
 def _force_utf8_stdio():
@@ -155,6 +168,11 @@ SERVER_META = {
     "server_code_dir": BASE_DIR,
     "server_data_dir": os.path.abspath(CONFIG.get("data_dir") or ""),
     "server_python": sys.executable,
+    # 版本号：同事报「启动失败」时，第一件要确认的就是他手上是不是新版
+    "server_version": VERSION,
+    # 真正监听的端口（start_server 里绑定成功后才填，可能因为端口被占而换过）
+    "server_port": None,
+    "server_parent_pid": PARENT_PID,
     # 配置文件本身的问题（编码/语法/路径写错）。非空时悬浮窗会把它顶到状态栏，
     # 免得用户「明明改了 config.json 却毫无反应」还以为是插件坏了。
     "config_problem": CONFIG_PROBLEM,
@@ -172,12 +190,80 @@ SERVER_META = {
 # 于是这些 [配置] 行会被一模一样地打印第二遍（子进程的 stdout 也是同一份
 # server.log）。配置是全进程共用的，说一遍就够了，重复行只会干扰看日志。
 if mp.current_process().name == "MainProcess":
+    print("[课程强度同步] v%s（后端）| 代码目录：%s" % (VERSION, BASE_DIR), flush=True)
     if CONFIG_PROBLEM:
         print("[配置] 有问题：%s" % CONFIG_PROBLEM.replace("\n", " / "), flush=True)
     for _n in CONFIG_NOTES:
         print("[配置] %s" % str(_n).replace("\n", " / "), flush=True)
     if not os.path.isfile(os.path.join(BASE_DIR, "config.json")):
         print("[配置] 没有 config.json，全部用默认值（自动探测达芬奇）。", flush=True)
+
+
+# ---------- worker 子进程登记（退出时要把它们一起带走） ----------
+
+_WORKERS = []                  # mp.Process 列表
+_WORKERS_LOCK = threading.Lock()
+
+
+def _register_worker(proc):
+    with _WORKERS_LOCK:
+        _WORKERS.append(proc)
+    return proc
+
+
+def _unregister_worker(proc):
+    with _WORKERS_LOCK:
+        try:
+            _WORKERS.remove(proc)
+        except ValueError:
+            pass
+
+
+def _kill_workers():
+    """杀掉所有 worker 子进程（尽力而为，绝不把退出流程卡住）。"""
+    with _WORKERS_LOCK:
+        procs = list(_WORKERS)
+        del _WORKERS[:]
+    for p in procs:
+        try:
+            if p.is_alive():
+                p.kill()
+        except Exception:
+            pass
+    for p in procs:
+        try:
+            p.join(timeout=1.5)
+        except Exception:
+            pass
+
+
+def parent_watchdog():
+    """父进程（launcher）没了就自杀。
+
+    launcher 正常退出时会主动清理后端的整棵进程树，但**它自己被强杀、崩溃或者
+    被任务管理器结束时不会**。少了这一环，后端就变成看不见的僵尸进程继续占着
+    端口，下一次双击 start.bat 就报「端口被占用」（用户反馈的原话：
+    「后台还是没跟随前端进程杀干净」）。
+
+    只在 launcher 通过环境变量告诉我们父进程 PID 时才启用；手动
+    `python server.py` 调试时不会误杀自己。
+    """
+    if not PARENT_PID:
+        return
+    while True:
+        time.sleep(2.0)
+        try:
+            if not overlay.pid_alive(PARENT_PID):
+                print(f"[退出] 启动器（PID {PARENT_PID}）已经不在了，后端跟着退出。",
+                      flush=True)
+                try:
+                    sys.stdout.flush()
+                except Exception:
+                    pass
+                _kill_workers()
+                os._exit(0)
+        except Exception:
+            pass
 
 
 # ---------- 前端存活检测（关掉悬浮窗后自动退出后端） ----------
@@ -247,7 +333,13 @@ class Liveness:
             sys.stderr.flush()
         except Exception:
             pass
-        os._exit(0)   # 直接退出：HTTP 线程/worker 子进程都由它带走
+        # **先杀掉 worker 子进程再退出。**
+        # 以前是直接 os._exit(0)，指望「子进程由它带走」—— 并不成立：
+        # os._exit 会跳过 multiprocessing 的收尾钩子，而 worker 是 daemon 进程，
+        # 收尾钩子才是杀 daemon 子进程的地方。结果 worker 留了下来（它握着与
+        # 达芬奇的连接），用户看到的就是「关了悬浮窗后台还有东西在跑」。
+        _kill_workers()
+        os._exit(0)   # HTTP 线程由它带走
 
 
 LIVENESS = Liveness(
@@ -275,6 +367,15 @@ class State:
         self.segment_remaining = 0.0   # 当前环节剩余秒数（end - t）
         self.next_step = None           # 下一个小动作信息 {"name","keyword","start"}，无则 None
         self.time_seconds = 0.0
+        # 达芬奇播放头的**绝对**时间码（"01:00:12:30"）与时间线起始时间码。
+        # 界面上的进度用相对秒（time_seconds），这两个只用于诊断显示 ——
+        # 「明明填了课件却抓不到」时，一看起点是 01:00:00:00 就明白了。
+        self.timecode = ""
+        self.timeline_start_tc = ""
+        # 这条时间线是不是「不用项目设置」的自定义设置（媒体池里带小齿轮）
+        self.custom_settings = False
+        # 播放头已经走过课件结束了（课件放完了，不是"抓不到课件"）
+        self.over_end = False
         self.connected = False
         self.message = "正在连接达芬奇..."
         self.mode = "init"  # worker 当前模式: 直传/本地推算/停止推算/init
@@ -304,6 +405,10 @@ class State:
                 "segment_remaining": self.segment_remaining,
                 "next_step": self.next_step,
                 "time_seconds": self.time_seconds,
+                "timecode": self.timecode,
+                "timeline_start_tc": self.timeline_start_tc,
+                "custom_settings": self.custom_settings,
+                "over_end": self.over_end,
                 "message": self.message,
                 "mode": self.mode,
                 "curve": self.curve,
@@ -771,6 +876,7 @@ def _resolve_worker(q, module_path, lib_path):
     import time as _time
     _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
     from resolve_connection import ResolveConnection as _RC
+    from resolve_connection import relative_seconds as _relative_seconds
 
     # 未连接时：多久重试一次连接（达芬奇可能在插件之后才启动）
     RECONNECT_INTERVAL = 3.0
@@ -888,21 +994,32 @@ def _resolve_worker(q, module_path, lib_path):
                     continue
 
             t0 = _time.time()
-            tl = conn.current_timeline_name()
-            tc_raw = conn.current_timecode()
+            # 一次把「时间线名 / 播放头 / 帧率 / 起始时间码」全取回来：
+            # 少一次原生调用，而且保证这四项来自同一条时间线（用户切时间线的
+            # 瞬间不会拿到拼接起来的矛盾数据）。
+            snap = conn.read_timeline()
+            tl = snap.get("name") or ""
+            tc_raw = snap.get("timecode") or ""
             try:
-                cur_fps = float(conn.current_framerate() or fps)
-            except Exception:
-                cur_fps = fps
-            fps = cur_fps
+                fps = float(snap.get("fps") or fps)
+            except (TypeError, ValueError):
+                pass
+            start_tc = snap.get("start_timecode") or ""
 
-            computed_tc = tc_raw if tc_raw else "00:00:00:00"
+            # 课件数据从 0 秒记起，而达芬奇的播放头时间码是**绝对**的
+            # （时间线起点是 01:00:00:00 的话，一开机就是 "01:00:00:00"）。
+            # 所以这里减掉起始时间码，换成「相对时间线起点的秒数」再交给匹配环节。
+            # 不勾「使用项目设置」新建的时间线起点默认就是 01:00:00:00 ——
+            # 这正是「那种时间线抓不到课件」的原因。
+            rel = _relative_seconds(tc_raw, start_tc, fps)
             mode = "raw"
-            q.put(("snapshot", tl, computed_tc, fps, mode))
+            q.put(("snapshot", tl, tc_raw, fps, mode, rel, start_tc,
+                   bool(snap.get("custom"))))
 
             # 调试：每秒打印一次
             if _time.time() - last_print > 1.0:
-                print(f"[worker] raw={tc_raw} out={computed_tc} mode={mode} tl={tl}", flush=True)
+                print(f"[worker] raw={tc_raw} start={start_tc or '-'} rel={rel:.2f}s "
+                      f"fps={fps:g} mode={mode} tl={tl}", flush=True)
                 last_print = _time.time()
 
             dt = _time.time() - t0
@@ -918,6 +1035,7 @@ def _spawn_worker(module_path, lib_path):
     q = mp.Queue()  # 不限大小，避免 worker put 阻塞
     p = mp.Process(target=_resolve_worker, args=(q, module_path, lib_path), daemon=True)
     p.start()
+    _register_worker(p)      # 登记在册：退出时要把它们一起杀掉（见 _kill_workers）
     return q, p
 
 
@@ -966,6 +1084,9 @@ def resolve_loop():
                 values={},
                 segment_remaining=0.0,
                 next_step=None,
+                over_end=False,
+                timecode="",
+                timeline_start_tc="",
                 message=msg,
             )
 
@@ -1005,6 +1126,7 @@ def resolve_loop():
                     _proc.join(timeout=2)
                 except Exception:
                     pass
+                _unregister_worker(_proc)
                 try:
                     _q.close()
                 except Exception:
@@ -1032,16 +1154,24 @@ def resolve_loop():
         if item[0] != "snapshot":
             continue
 
-        # 正常 snapshot（兼容旧版 4-tuple 和新版 5-tuple）
+        # 正常 snapshot（兼容旧版 4-tuple / 中版 5-tuple / 新版 8-tuple）
         _set_conn(True, "")
         tl_name = item[1]
         tc = item[2]
         fps = item[3] if len(item) > 3 else 25.0
         mode = item[4] if len(item) > 4 else "unknown"
+        # 相对秒（已减掉时间线起始时间码）—— 课件数据的时间基就是它
+        if len(item) > 5 and item[5] is not None:
+            t = float(item[5])
+        else:
+            t = timecode_to_seconds(tc, fps)      # 兼容旧版 worker
+        start_tc = item[6] if len(item) > 6 else ""
+        custom = bool(item[7]) if len(item) > 7 else False
         # 匹配课程
         course = COURSES.find(tl_name)
 
-        STATE.update(connected=True, message="", mode=mode)
+        STATE.update(connected=True, message="", mode=mode, timecode=tc,
+                     timeline_start_tc=start_tc, custom_settings=custom)
 
         if course is None:
             STATE.update(
@@ -1057,16 +1187,21 @@ def resolve_loop():
                 values={},
                 segment_remaining=0.0,
                 next_step=None,
+                over_end=False,
                 message=("未找到对应课程的强度数据（按器械+课程名匹配；如确认有对应 JSON，"
                          "请检查时间线名是否含器械前缀，如'爬楼机-XXX'、'椭圆机-XXX'、'跑步机-XXX'）"
                          if tl_name else "已连接达芬奇，但当前没有打开的时间线"),
             )
         else:
-            # 时间码 -> 秒
-            t = timecode_to_seconds(tc, fps) if tc else 0.0
+            # 播放头走过课件结尾：这不是「抓不到课件」，明确告诉用户「课件已结束」，
+            # 否则界面上只会显示一个孤单的「—」，看起来像插件坏了。
+            duration = float(getattr(course, "duration", 0) or 0)
+            over_end = bool(duration) and t > duration
+
             # 调试：每秒打印一次 t（用独立计数器，避免 dbg_last 被前面的 print 抢占）
             if time.time() - dbg_last > 1.0:
-                print(f"[main] tc={tc} fps={fps} t={t:.2f} seg={course.segment_at(t)}", flush=True)
+                print(f"[main] tc={tc} start={start_tc or '-'} fps={fps:g} t={t:.2f} "
+                      f"over_end={over_end} seg={course.segment_at(t)}", flush=True)
                 dbg_last = time.time()
 
             segment = course.segment_at(t)
@@ -1101,9 +1236,11 @@ def resolve_loop():
                 next_step=next_step,
                 time_seconds=t,
                 mode=mode,
+                over_end=over_end,
                 field_meta=field_meta,
                 curve=build_curve(course),
-                message="",
+                message=("已超过课件结束时间（课件总长 %d:%02d）"
+                         % (int(duration) // 60, int(duration) % 60) if over_end else ""),
             )
 
         # 不在这里 sleep：worker 已经按 0.1s 节奏 put，主进程紧跟 get 即可
@@ -1224,30 +1361,157 @@ class Handler(BaseHTTPRequestHandler):
 
 
 class _SyncHTTPServer(ThreadingHTTPServer):
-    """多线程 HTTP 服务器，但**关掉端口复用**。
+    """多线程 HTTP 服务器，端口复用**先探测再决定**。
 
-    为什么：Windows 上 allow_reuse_address（SO_REUSEADDR）的语义是「允许绑定一个
-    已被别人监听的端口」。结果就是旧后端没被杀干净时，新后端会"看似启动成功"，
-    而请求可能落到旧进程上——表现就是「改了代码却像没生效」「数据是旧的」。
+    这里踩过两个相反的坑，最后是「先探测、再复用」才同时躲开：
 
-    关掉之后端口被占就直接报错，配合 launcher 的清理逻辑，行为可预期。
+    坑一（早期）：Windows 上 SO_REUSEADDR 的语义是「允许绑定一个**已被别人监听**
+    的端口」，而 Python 的 HTTPServer 默认就开着它。于是旧后端没被杀干净时，新后端
+    会"看似启动成功"，请求却随机落到旧进程上 —— 表现就是「改了东西像没生效」
+    「数据是旧的」。
+
+    坑二（改成关掉之后）：关掉确实不会劫持了，但**上一次运行留下的 TIME_WAIT
+    连接**（服务器主动关闭的那些连接会留在 TIME_WAIT，典型 30~120 秒）会让 bind
+    直接失败。用户看到的现象就是：刚关掉悬浮窗、马上再双击 start.bat，弹「后端启动
+    失败，常见原因：端口被占用」；重启电脑后 TIME_WAIT 没了才又正常 —— 完全对得上
+    用户的反馈。
+
+    所以现在的做法：**先 connect 一次探测**（TIME_WAIT 的连接不响应 connect，
+    所以探测结果只会说「有没有活的监听者」），确认没人听才允许复用地址。
+    两全：既不劫持活着的服务，也不会被 TIME_WAIT 卡住。
     """
-    allow_reuse_address = False
+
     daemon_threads = True
+
+    def server_bind(self):
+        if not _port_listening(self.server_address[1]):
+            # 没有活的监听者 → 允许复用（这样 TIME_WAIT 不会挡路）
+            self.allow_reuse_address = True
+        else:
+            # 探测与 bind 之间有人挤进来（极少见）→ 老老实实失败，让调用方换端口
+            self.allow_reuse_address = False
+        super().server_bind()
+
+
+def _port_listening(port, host="127.0.0.1", timeout=0.35):
+    """端口上有没有**活的监听者**（TIME_WAIT 不算）。"""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(timeout)
+            s.connect((host, int(port)))
+            return True
+    except OSError:
+        return False
+
+
+def _who_is_on_port(port):
+    """问一下端口上的服务是不是本插件，返回它自报的代码目录（问不到返回空串）。"""
+    try:
+        with urllib.request.urlopen(
+                "http://127.0.0.1:%d/diag" % int(port), timeout=0.6) as r:
+            d = json.loads(r.read().decode("utf-8"))
+        return str(d.get("server_code_dir") or "")
+    except Exception:
+        return ""
+
+
+def _free_port():
+    """让系统随便给一个空闲端口。"""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+
+
+def _pick_port(preferred):
+    """决定监听哪个端口，返回 (端口, 说明或空串)。
+
+    规则（顺序很重要）：
+      1. 没人听 → 就用它（上一次运行留下的 TIME_WAIT 也算没人听，靠 server_bind
+         里的复用重新绑上）；
+      2. 有人听，但对方就是本插件（/diag 自报的代码目录一样）→ 换一个空闲端口，
+         并说清楚「已经有一个在跑」，而不是直接报错退出；
+      3. 有人听，是别的程序（用户自己跑的东西占了 8765）→ 同样换个空闲端口。
+
+    这么处理之后，「端口被占用」不再是用户能看到的东西 —— 它只会体现在日志里。
+    """
+    preferred = int(preferred or 8765)
+    if not _port_listening(preferred):
+        return preferred, ""
+    other = _who_is_on_port(preferred)
+    if other and os.path.normcase(os.path.abspath(other)) == os.path.normcase(BASE_DIR):
+        why = (f"端口 {preferred} 上已经有一个本插件的后端在跑（代码目录相同），"
+               f"这一个改用别的端口，互不影响。")
+    elif other:
+        why = (f"端口 {preferred} 被别的程序占用了（它自报的代码目录：{other}），"
+               f"自动改用别的端口。")
+    else:
+        why = (f"端口 {preferred} 被别的程序占用（问不出是什么程序），"
+               f"自动改用别的端口。")
+    return _free_port(), why
+
+
+def write_server_json(port):
+    """把「我是谁、我听的哪个端口」写到 .runtime/server.json。
+
+    为什么需要它：launcher / 体检 / 下次启动都要能**准确找到自己这个实例**——
+    「杀掉上次没退干净的旧后端」必须只杀自己人（代码目录相同），不能误伤用户
+    别的程序；而端口可能因为被占用而变过，光看 config.json 里的 8765 是不够的。
+    """
+    info = {
+        "pid": os.getpid(),
+        "port": int(port),
+        "code_dir": BASE_DIR,
+        "version": VERSION,
+        "python": sys.executable,
+        "parent_pid": PARENT_PID,
+        "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    try:
+        os.makedirs(RUNTIME_DIR, exist_ok=True)
+        tmp = SERVER_JSON + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(info, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, SERVER_JSON)
+    except Exception as e:
+        print(f"[端口] 写 server.json 失败（不影响运行）：{e}", flush=True)
+    return info
 
 
 def start_server():
-    # 用多线程 HTTP 服务器：fusionscript 的 native 调用会长时间持有 GIL，
-    # 单线程模式会导致 HTTP 响应被阻塞，客户端 fetch 失败。
-    try:
-        server = _SyncHTTPServer(("127.0.0.1", CONFIG["port"]), Handler)
-    except OSError as e:
-        print(f"[错误] 无法监听端口 {CONFIG['port']}：{e}", flush=True)
-        print("      多半是上一个后端没退干净。重新双击 start.bat 即可（它会先清理）。",
-              flush=True)
-        raise
+    """绑定端口并开始服务。
 
-    print(f"[课程强度同步] HTTP 服务已启动: http://127.0.0.1:{CONFIG['port']}")
+    「端口被占」在这里被当成**正常情况**处理：自动换端口，绝不因此打不开插件。
+    用户原来看到的那句「后端启动失败：常见原因：端口被占用」是历史包袱 ——
+    现在最多只会在日志里留一行「已自动改用端口 XXXX」。
+    """
+    port, why = _pick_port(CONFIG["port"])
+    if why:
+        print("[端口] " + why, flush=True)
+    CONFIG["port"] = port
+
+    server = None
+    last_err = None
+    for attempt in range(4):
+        SERVER_META["server_port"] = port
+        write_server_json(port)
+        try:
+            # 多线程：fusionscript 的 native 调用会长时间持有 GIL，单线程模式下
+            # HTTP 响应会被阻塞，客户端 fetch 直接超时。
+            server = _SyncHTTPServer(("127.0.0.1", port), Handler)
+            break
+        except OSError as e:
+            last_err = e
+            print(f"[端口] 绑定 {port} 失败（第 {attempt + 1} 次）：{e}", flush=True)
+            time.sleep(0.2)
+            port = _free_port()
+            CONFIG["port"] = port
+            print(f"[端口] 已自动改用端口 {port}", flush=True)
+
+    if server is None:
+        print(f"[错误] 换了几个端口都绑不上，最后失败：{last_err}", flush=True)
+        raise SystemExit(1)
+
+    print(f"[课程强度同步] HTTP 服务已启动: http://127.0.0.1:{port}", flush=True)
     if LIVENESS.enabled:
         print(f"[课程强度同步] 悬浮窗关闭后自动退出已开启"
               f"（兜底空闲 {LIVENESS.idle_timeout:.0f}s）")
@@ -1262,6 +1526,10 @@ if __name__ == "__main__":
     # 后台线程：前端存活检测（关掉悬浮窗 → 自动退出）
     tw = threading.Thread(target=LIVENESS.watchdog, daemon=True)
     tw.start()
+
+    # 后台线程：父进程（launcher）死了就自杀 —— 防止「后台还留着占端口的僵尸」
+    tp = threading.Thread(target=parent_watchdog, daemon=True)
+    tp.start()
 
     # 前台：HTTP 服务
     try:

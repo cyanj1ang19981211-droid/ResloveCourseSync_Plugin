@@ -6,8 +6,13 @@
 窗口初始尺寸按屏幕工作区的比例算（见下方 WINDOW_SIZE_RATIO），并可选「始终置顶」
 （见下方说明；对应前端左上角的图钉按钮）。
 
+**悬浮窗用的是自己的浏览器档案（独立 user-data-dir）**，见 EDGE_PROFILE_DIR ——
+这样它和用户自己开的 Edge 完全不相干：用户关掉自己的 Edge 不会把悬浮窗带走，
+用户开自己的网页也不会挤进悬浮窗这个窗口，退出时我们也能干净地只关掉自己那一个
+浏览器实例（不会误杀用户正在用的 Edge）。
+
 注意：Edge 对 --app 窗口会恢复「上次记住的尺寸」，经常完全无视 --window-size，
-所以开窗后还会用 Win32 SetWindowPos 再强制一次（见 _enforce_window_size）。
+所以开窗后还会用 Win32 SetWindowPos 再强制一次（见 _enforce_window_layout）。
 
 用法：
     python overlay.py            # 只开窗（后端需另行启动）
@@ -15,14 +20,33 @@
 
 本模块只负责「把窗户开出来」，进程编排交给 launcher.py。
 """
+import ctypes
 import json
 import os
 import subprocess
 import time
 import webbrowser
+from ctypes import wintypes
+
+from version import VERSION
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 OVERLAY = os.path.join(BASE_DIR, "frontend", "overlay.html")
+RUNTIME_DIR = os.path.join(BASE_DIR, ".runtime")
+
+# 悬浮窗专用的 Edge 档案目录（cookie/缓存/窗口尺寸记忆都在里面，不进 git）。
+#
+# 为什么必须独立（否则就是「用户自己的 Edge 和插件打架」）：
+#   · 共用默认档案时，悬浮窗其实是**用户那个 Edge 实例**里的一个窗口 —— 用户
+#     关掉自己的浏览器，悬浮窗跟着消失；用户按 Ctrl+Shift+W 之类也会带走它；
+#   · 反过来，我们用 taskkill 清理自己的悬浮窗时，杀的就是用户那个浏览器进程，
+#     会把用户所有标签页一起关掉；
+#   · 独立档案之后，它是另一个 Edge 实例：互不干扰，也能精确地只关掉自己。
+EDGE_PROFILE_DIR = os.path.join(RUNTIME_DIR, "edge-profile")
+
+# 记录「我开的那个悬浮窗是谁」（pid + 窗口所属进程），退出时据此精确清理。
+# 放在 .runtime/ 里（已 gitignore）。
+OVERLAY_STATE = os.path.join(RUNTIME_DIR, "overlay.json")
 
 # ---------------------------------------------------------------- 悬浮窗尺寸
 # 初始尺寸按「屏幕工作区」的比例计算，而不是写死像素——这样 1080p 和 4K 上
@@ -41,7 +65,11 @@ WINDOW_SIZE_MAX = (720, 620)      # 太大的屏幕上别铺满
 
 # 悬浮窗标题（overlay.html 的 <title>）。launcher.py 靠它判断窗口是否被关掉，
 # 改动时两处要一起改。
-OVERLAY_TITLE = "课程强度同步"
+#
+# 可以用环境变量 RESOLVE_SYNC_TITLE 覆盖（连 overlay.html 也要改），用途只有一个：
+# **自动化测试/沙箱**。同一台机器上如果要开两个实例，两个窗口标题一模一样的话，
+# 先开的那个 launcher 会把后开的窗口当成自己的，测试就会互相误杀。
+OVERLAY_TITLE = os.environ.get("RESOLVE_SYNC_TITLE") or "课程强度同步"
 
 # 是否让悬浮窗「始终置顶」（替代手动按 Win+Ctrl+T，效果同 PowerToys 的
 # Always On Top）。config.json 里可用 "always_on_top": false 关掉。
@@ -239,10 +267,12 @@ def write_topmost_pref(on):
 
 
 def launch_overlay(detached=True):
-    """打开悬浮窗，返回 (是否成功, 是否为独立 app 窗口)。
+    """打开悬浮窗，返回 (是否成功, 是否为独立 app 窗口, 进程对象或 None)。
 
     第二个返回值很关键：launcher 只在「确实开出了独立 app 窗口」时才去监控
     窗口关闭；退回默认浏览器（变成普通标签页）时不做窗口监控。
+
+    第三个返回值是刚起的 msedge 进程，交给 launcher 做退出清理（见 stop_overlay）。
     """
     edge = find_edge()
     url = overlay_url()
@@ -250,30 +280,350 @@ def launch_overlay(detached=True):
     topmost = read_topmost_pref()   # 用户上次点图钉的选择优先于 config 默认值
 
     if edge:
+        try:
+            os.makedirs(EDGE_PROFILE_DIR, exist_ok=True)
+        except Exception:
+            pass
         cmd = [
             edge,
             "--app=" + url,
             f"--window-size={size[0]},{size[1]}",
+            # 独立档案目录 —— 与用户自己的 Edge 彻底隔开（见 EDGE_PROFILE_DIR 说明）
+            "--user-data-dir=" + EDGE_PROFILE_DIR,
+            # 新档案第一次启动别弹「首次运行引导 / 设为默认浏览器」这些向导，
+            # 否则用户看到的是一个向导页而不是悬浮窗。
+            "--no-first-run",
+            "--no-default-browser-check",
             "--disable-features=msEdgeSidebarV2",
         ]
         flags = 0x00000008 if detached else 0  # DETACHED_PROCESS
+        proc = None
         try:
-            subprocess.Popen(cmd, creationflags=flags)
+            proc = subprocess.Popen(cmd, creationflags=flags)
         except OSError:
-            pass  # 启动失败，落到下面的默认浏览器
-        else:
+            proc = None  # 启动失败，落到下面的默认浏览器
+        if proc is not None:
             # Edge 对 --app 窗口会恢复「上次记住的尺寸」，常常完全无视
             # --window-size（实测请求 415x370，实际开出 1522x1660 = 半屏）。
             # 所以等窗口出现后再用 SetWindowPos 强制一次，同时把它置顶。
             _enforce_window_layout(size, topmost=topmost)
-            return True, True
+            reminder_overlay_state(proc)
+            return True, True, proc
 
     # 没有 Edge 时退回默认浏览器（会是普通标签页，非独立窗口）
     try:
         webbrowser.open(url)
-        return True, False
+        return True, False, None
     except Exception:
-        return False, False
+        return False, False, None
+
+
+# ---------------------------------------------------------------- 进程/窗口工具
+#
+# 都是「退出时要把自己开的东西收干净」用的。放在 overlay.py 里是因为它本来就是
+# 这个项目的 Win32 小工具模块（server.py 借它的置顶实现，launcher.py 借它的
+# 窗口枚举），进程清理和窗口枚举是同一类东西。
+#
+# 注意：ctypes 调 Win32 **必须先设 argtypes/restype**。不设的话 HANDLE 会被当成
+# 32 位 int 传，64 位下句柄失真（这个坑在本文件上面的窗口部分已经踩过一次）。
+
+def _procs():
+    """返回 (kernel32, user32)，都设好了 argtypes/restype。失败返回 (None, None)。"""
+    try:
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        u32 = ctypes.WinDLL("user32", use_last_error=True)
+
+        k32.OpenProcess.restype = wintypes.HANDLE
+        k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        k32.WaitForSingleObject.restype = wintypes.DWORD
+        k32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        k32.CloseHandle.restype = wintypes.BOOL
+        k32.CloseHandle.argtypes = [wintypes.HANDLE]
+        k32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+        k32.QueryFullProcessImageNameW.argtypes = [
+            wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        u32.GetWindowThreadProcessId.restype = wintypes.DWORD
+        u32.GetWindowThreadProcessId.argtypes = [
+            wintypes.HWND, ctypes.POINTER(wintypes.DWORD),
+        ]
+        return k32, u32
+    except Exception:
+        return None, None
+
+
+def pid_alive(pid) -> bool:
+    """进程还活着吗。
+
+    用途：父进程看门狗（server.py）判断 launcher 还在不在。
+    打不开句柄时**保守地认为还活着**（宁可多活一会儿，也不要误杀），
+    唯一例外是错误码 87（参数错误 = 没这个进程）。
+    """
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    k32, _u32 = _procs()
+    if not k32:
+        return True
+    SYNCHRONIZE = 0x00100000
+    h = k32.OpenProcess(SYNCHRONIZE, False, pid)
+    if not h:
+        return ctypes.get_last_error() != 87      # 87 = ERROR_INVALID_PARAMETER
+    try:
+        # WaitForSingleObject 返回 0 = 对象已 Signaled = 进程已退出
+        return k32.WaitForSingleObject(h, 0) != 0
+    finally:
+        k32.CloseHandle(h)
+
+
+def proc_image_path(pid):
+    """进程的 exe 完整路径（拿不到返回空串）。用来确认「这个 PID 确实是 msedge」。"""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return ""
+    k32, _u32 = _procs()
+    if not k32:
+        return ""
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    h = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not h:
+        return ""
+    try:
+        buf = ctypes.create_unicode_buffer(1024)
+        n = wintypes.DWORD(len(buf))
+        if k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(n)):
+            return buf.value
+    except Exception:
+        pass
+    finally:
+        k32.CloseHandle(h)
+    return ""
+
+
+def window_owner_pid(hwnd):
+    """窗口所属进程的 PID（拿不到返回 0）。"""
+    u32_ = ctypes.WinDLL("user32", use_last_error=True)
+    try:
+        u32_.GetWindowThreadProcessId.argtypes = [
+            wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+        pid = wintypes.DWORD(0)
+        u32_.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        return int(pid.value)
+    except Exception:
+        return 0
+
+
+def kill_tree(pid, expect_prefix="msedge") -> bool:
+    """杀掉进程及其整棵子进程树（`/T`：Edge 和 Python 都会带一串子进程）。
+
+    只对「exe 名字以 expect_prefix 开头」的进程生效 —— 这是防误杀的最后一道闸：
+    万一 pid 已经被系统复用成了别的程序，这里会拒绝动手。
+        · 悬浮窗 → expect_prefix="msedge"
+        · 后端   → expect_prefix="python"（python.exe 或 pythonw.exe 都算）
+    """
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    image = proc_image_path(pid)
+    if not image:
+        return False
+    if expect_prefix and not os.path.basename(image).lower().startswith(expect_prefix.lower()):
+        return False
+    try:
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                       capture_output=True, timeout=15,
+                       creationflags=0x08000000)   # CREATE_NO_WINDOW
+        return True
+    except Exception:
+        return False
+
+
+def _overlay_window_pids():
+    """标题是本插件悬浮窗的窗口，其所属进程 PID 列表。"""
+    u32_, wintypes_ = _win32()
+    if not u32_:
+        return []
+    pids = []
+    try:
+        own = ctypes.windll.kernel32.GetConsoleWindow()
+
+        def _cb(hwnd, _lparam):
+            if hwnd == own or not u32_.IsWindowVisible(hwnd):
+                return True
+            n = u32_.GetWindowTextLengthW(hwnd)
+            if n <= 0:
+                return True
+            buf = ctypes.create_unicode_buffer(n + 1)
+            u32_.GetWindowTextW(hwnd, buf, n + 1)
+            if OVERLAY_TITLE in buf.value:
+                p = window_owner_pid(hwnd)
+                if p:
+                    pids.append(p)
+            return True
+
+        ENUM = ctypes.WINFUNCTYPE(wintypes_.BOOL, wintypes_.HWND, wintypes_.LPARAM)
+        u32_.EnumWindows(ENUM(_cb), 0)
+    except Exception:
+        return []
+    return pids
+
+
+def reminder_overlay_state(proc=None):
+    """记下「这次的悬浮窗是谁」，供退出清理与下一次启动清场用。
+
+    为什么不能只靠 `proc.pid`：Edge 的多进程结构里，我们 Popen 出来的那个进程
+    不一定是**开着窗口**的那个（同档案再开一个窗口时，新进程会把请求交给已有
+    实例然后自己退出）。所以窗口出现后，按窗口反查一次真正的宿主 PID 更可靠。
+    """
+    info = read_overlay_state() or {}
+    if proc is not None:
+        try:
+            info["pid"] = int(proc.pid)
+        except Exception:
+            pass
+    info["profile_dir"] = EDGE_PROFILE_DIR
+    # 窗口可能还没出现（Edge 要几百毫秒），稍等一下再反查，免得记了个空值
+    for _ in range(20):
+        pids = _overlay_window_pids()
+        if pids:
+            info["window_pid"] = pids[0]
+            break
+        time.sleep(0.2)
+    info["title"] = OVERLAY_TITLE
+    info["version"] = VERSION
+    try:
+        os.makedirs(RUNTIME_DIR, exist_ok=True)
+        tmp = OVERLAY_STATE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(info, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, OVERLAY_STATE)
+    except Exception:
+        pass
+    return info
+
+
+def read_overlay_state():
+    """读回上次记录的悬浮窗信息（没有/读坏了返回空 dict）。"""
+    try:
+        with open(OVERLAY_STATE, "r", encoding="utf-8") as f:
+            v = json.load(f)
+        return v if isinstance(v, dict) else {}
+    except Exception:
+        return {}
+
+
+def stop_overlay(proc=None):
+    """关掉我们自己开出来的悬浮窗（只关自己的，绝不碰用户的 Edge）。
+
+    清理三个来源，逐个都是「确认过确实是 msedge 才动手」：
+        1. 这次 Popen 出来的进程；
+        2. .runtime/overlay.json 里记着的上次实例（防止上一轮没清干净）；
+        3. 标题正是本插件悬浮窗、且属于**我们的独立档案**的窗口。
+
+    第 3 条为什么要额外校验档案：老版本（还没有独立档案的时候）是在用户自己的
+    Edge 里开窗的，那个窗口标题跟我们一样 —— 但它属于用户的浏览器进程，
+    一刀切地按标题杀会把用户所有标签页一起关掉。
+    """
+    cands = []
+    if proc is not None:
+        try:
+            cands.append(int(proc.pid))
+        except Exception:
+            pass
+    st = read_overlay_state()
+    # 状态文件只认「自己写的」那一份：两个 launcher 前后脚启动时，先启动的那个
+    # 可能读到后一个刚写进去的记录，照着杀就会把**别人刚开出来的窗口**关掉。
+    if int(st.get("owner_pid") or 0) == os.getpid():
+        for key in ("pid", "window_pid"):
+            try:
+                p = int(st.get(key) or 0)
+                if p and p not in cands:
+                    cands.append(p)
+            except (TypeError, ValueError):
+                pass
+
+    profile = os.path.normcase(os.path.abspath(EDGE_PROFILE_DIR))
+    for p in _overlay_window_pids():
+        if p in cands:
+            continue
+        # 只认「用同一个独立档案」的 msedge：命令行里带我们的 user-data-dir。
+        # 拿不到命令行就不动它 —— 宁可留一个死窗口让用户手动关，也不误杀用户的浏览器。
+        if _proc_cmdline_has(p, profile):
+            cands.append(p)
+
+    killed = []
+    for p in cands:
+        if kill_tree(p):
+            killed.append(p)
+    try:
+        if os.path.exists(OVERLAY_STATE):
+            os.remove(OVERLAY_STATE)
+    except Exception:
+        pass
+    if killed:
+        print(f"[退出] 已关闭悬浮窗（msedge PID {', '.join(str(p) for p in killed)}）",
+              flush=True)
+    return killed
+
+
+def _proc_cmdline_has(pid, needle, timeout=6.0):
+    """进程命令行里是否含某个字符串（用 PowerShell 查一次，失败就返回 False）。
+
+    只在退出清理时调用一次，慢一点无所谓；绝不为了让清理更"聪明"而冒险误杀。
+    """
+    if not needle:
+        return False
+    try:
+        ps = ("(Get-CimInstance Win32_Process -Filter \"ProcessId=%d\")"
+              ".CommandLine" % int(pid))
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+            capture_output=True, text=True, errors="replace", timeout=timeout,
+            creationflags=0x08000000)
+        return needle.lower() in (out.stdout or "").lower()
+    except Exception:
+        return False
+
+
+def kill_stale_overlay():
+    """启动前清场：上一次留下的悬浮窗先关掉。
+
+    不清的话会出现两个悬浮窗叠着（旧的那个连着一个已经死掉的后端，还显示着上次
+    的数据），用户会以为「插件乱了」。
+
+    两步走，都只对**确认是我们自己**的 msedge 动手（overlay.kill_tree 会核对 exe 名）：
+        1. .runtime/overlay.json 里记着的 pid / window_pid（上一次自己写的，最准）；
+        2. 兜底：标题正是悬浮窗、且命令行里带我们的独立档案目录的窗口。
+    """
+    dead = []
+    st = read_overlay_state()
+    for key in ("pid", "window_pid"):
+        try:
+            p = int(st.get(key) or 0)
+        except (TypeError, ValueError):
+            continue
+        if p and p not in dead and kill_tree(p):
+            dead.append(p)
+
+    profile = os.path.normcase(os.path.abspath(EDGE_PROFILE_DIR))
+    for p in _overlay_window_pids():
+        if p in dead:
+            continue
+        if _proc_cmdline_has(p, profile) and kill_tree(p):
+            dead.append(p)
+
+    if dead:
+        print(f"[启动] 已关掉上一次留下的悬浮窗（PID {', '.join(map(str, dead))}）",
+              flush=True)
+    return dead
 
 
 def apply_topmost(on):
@@ -497,12 +847,12 @@ def _enforce_window_layout(size, topmost=True, timeout=10.0):
 
 
 def launch():
-    ok, app_mode = launch_overlay()
+    ok, app_mode, _proc = launch_overlay()
     if not ok:
         print("启动悬浮窗失败：没找到可用的浏览器。")
         return
     if app_mode:
-        print("已启动悬浮窗（Edge app 模式）。")
+        print("已启动悬浮窗（Edge app 模式，使用独立浏览器档案，不影响你自己的 Edge）。")
         if read_topmost_pref():
             print("已置顶；点悬浮窗左上角的图钉按钮可取消（取消后下次打开也不再置顶）。")
     else:

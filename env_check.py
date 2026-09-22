@@ -603,11 +603,33 @@ def check_resolve_link():
     if data.get("timecode"):
         lines.append("播放头　：" + str(data["timecode"]))
 
+    # 时间线起点 + 是不是「不用项目设置」的自定义设置（媒体池里带小齿轮的）。
+    # 「那种时间线抓不到课件」就是起点惹的祸：没勾「使用项目设置」的时间线会用
+    # 对话框里那个起始时间码（默认 01:00:00:00），而课件数据是从 0 秒记起的，
+    # 不减掉起点的话播放头一开就落在课件外面。插件现在会自动对齐，报告里也把
+    # 这件事说清楚，免得用户以为插件坏了。
+    start_tc = str(data.get("start_timecode") or "")
+    custom = str(data.get("custom_settings") or "").strip() not in ("", "0", "false", "False")
+    if start_tc:
+        tag = "（不是 00:00:00:00，插件已自动按起点对齐）" if start_tc != "00:00:00:00" else ""
+        lines.append("时间线起点：" + start_tc + tag)
+    if custom:
+        lines.append("时间线设置：自定义（新建时没勾「使用项目设置」，媒体池里带小齿轮）")
+    if data.get("rel_seconds") is not None:
+        try:
+            lines.append("课件内位置：第 %d 秒（= 播放头时间码 - 时间线起点）"
+                         % int(float(data["rel_seconds"])))
+        except (TypeError, ValueError):
+            pass
+
     total = data.get("course_total")
     if isinstance(total, int):
         lines.append("已导入课件：%d 份" % total)
     match = str(data.get("match") or "")
     lines.append("课程匹配：" + ("成功 -> " + match if match else "没匹配上"))
+    seg = str(data.get("segment_at_now") or "")
+    if match:
+        lines.append("此刻环节：" + (seg if seg else "（课件已结束 / 还没到第一个环节）"))
 
     if not tl:
         return dict(
@@ -626,6 +648,20 @@ def check_resolve_link():
                 advice += "    …（共 %d 份）\n" % total
         advice += ("\n办法：在达芬奇的时间线管理器里双击改名，改成和课件名一致即可。\n"
                    "带器械前缀更保险，例如「爬楼机-20min心肺间歇突破攀登」。")
+        if start_tc and start_tc != "00:00:00:00":
+            advice += ("\n\n（另外提醒：这条时间线的起点是 %s，进度按起点对齐 —— "
+                       "这一点已经处理好了，与「名字对不上」无关。）" % start_tc)
+        return dict(level=WARN, title=title, lines=lines, advice=advice)
+
+    # 匹配上了，但当前时刻查不到环节 —— 绝大多数就是「课件已结束」（播放头停在
+    # 结尾之外），少数是起点没对齐。以前这种情况报告里一片"通过"，用户却看着
+    # 悬浮窗上一片空白，无从下手。
+    if not seg:
+        advice = ("课件匹配上了，但播放头当前位置落在课件的「环节表」之外：\n"
+                  "  · 最常见：播放头已经走过课件结尾（课件放完了）—— 把播放头往回\n"
+                  "    拖到课件范围内即可；\n"
+                  "  · 也可能是时间线起点不是 %s，而插件按起点对齐后进度与课件对不上。\n"
+                  % (start_tc or "00:00:00:00"))
         return dict(level=WARN, title=title, lines=lines, advice=advice)
 
     return dict(level=OK, title=title, lines=lines, advice="")
@@ -811,18 +847,26 @@ def check_port():
         return dict(
             level=WARN, title="后端端口 %d" % port,
             lines=["端口被占用，但上面的程序不回应本插件的诊断接口",
-                   "（多半是别的软件占了这个端口，插件后端没跑起来）"],
-            advice=("把占用这个端口的程序关掉，或者把 config.json 里的 port\n"
-                    "改成别的（比如 8766），再双击 start.bat。"))
+                   "（多半是别的软件占着这个端口）",
+                   "",
+                   "不用处理：新版插件会自动改用别的空闲端口（日志里能看到「自动改用",
+                   "端口 XXXX」），不会再像以前那样弹「后端启动失败」。"],
+            advice="如果你就是想让插件固定用这个端口，把占用它的程序关掉再启动插件即可。")
 
     lines = ["端口上正在运行插件后端（正常，说明插件正开着）", "",
-             "它自己报告的状态：",
+             "它自己报告的状态："]
+    if info.get("server_version"):
+        lines.append("  插件版本　：" + str(info["server_version"]))
+    lines += [
              "  连接达芬奇：" + ("已连接" if info.get("connected") else "未连接"),
              "  当前时间线：" + (str(info.get("timeline_name") or "") or "（没读到）"),
              "  匹配到课件：" + (("是 -> " + str(info.get("course_name") or ""))
                                 if info.get("course_loaded") else "否"),
              "  课件数量　：" + str(info.get("course_count")),
              "  读取目录　：" + str(info.get("server_data_dir") or "（未上报）")]
+    if info.get("timeline_start_tc") and str(info["timeline_start_tc"]) != "00:00:00:00":
+        lines.append("  时间线起点：" + str(info["timeline_start_tc"])
+                     + "（不是 00:00:00:00，进度已按起点对齐）")
     if info.get("message"):
         lines.append("  悬浮窗那行小字：" + str(info["message"]))
 
@@ -868,7 +912,7 @@ def check_files():
     # 里自相矛盾，用户只能一脸问号地重新下载一遍。
     need = ["server.py", "launcher.py", "overlay.py", "course_data.py",
             "equipment_config.py", "resolve_connection.py", "config_io.py",
-            "xlsx_to_json.py", "convert_course.py", "probe_resolve.py",
+            "version.py", "xlsx_to_json.py", "convert_course.py", "probe_resolve.py",
             "env_check.py",
             os.path.join("frontend", "overlay.html")]
     missing = [f for f in need if not os.path.exists(os.path.join(BASE_DIR, f))]
@@ -930,8 +974,13 @@ def run_checks(include_link=True):
 def render(results, with_advice=True):
     """把检查结果渲染成给人看的中文报告文本。"""
     line = "=" * 62
+    try:
+        from version import VERSION as _V
+    except Exception:
+        _V = "?"
     out = [line, "  课程强度同步插件 · 环境体检", line,
            "  项目目录：" + BASE_DIR,
+           "  插件版本：v" + _V + "（报问题时请先报这个号）",
            "  体检时间：" + time.strftime("%Y-%m-%d %H:%M:%S"),
            "  Python  ：" + sys.version.replace("\n", " "),
            ""]

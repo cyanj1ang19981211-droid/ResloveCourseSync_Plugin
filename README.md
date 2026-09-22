@@ -32,10 +32,11 @@ overlay.html  ── dark overlay window, real-time rendering
 | `resolve_connection.py` | Wrapper around the DaVinci Resolve Scripting API |
 | `course_data.py` | Course data loading + stepped (time-based) queries |
 | `equipment_config.py` | Equipment field configuration (treadmill / bike / rower / elliptical / bodyweight) |
-| `overlay.html` / `overlay.py` | Dark overlay window + Edge app-mode launcher (pin-button topmost, auto size fix) |
+| `overlay.html` / `overlay.py` | Dark overlay window + Edge app-mode launcher (pin-button topmost, auto size fix); uses a **separate Edge profile** and reaps its own window by process tree, never touching your own browser |
 | `xlsx_to_json.py` | **Converts course `.xlsx` files into plugin JSON** (command-line entry) |
 | `convert_course.py` / `convert.bat` | Graphical conversion: file-picker dialog → JSON |
-| `launcher.py` | What `start.bat` actually runs: pre-flight environment check + hidden backend + overlay + topmost keep-alive + auto-shutdown |
+| `launcher.py` | What `start.bat` actually runs: pre-flight environment check + clears its own stale instance + **auto-switches to a free port when one is taken** + hidden backend + overlay + topmost keep-alive + reaps the whole process tree on close |
+| `version.py` | Single source of the version number (shown in the startup log, failure dialog, health report and `/diag`, so an old copy is obvious) |
 | `start.bat` | One-click startup (no console window; closing the overlay exits everything) |
 | `env_check.py` / `检查环境.bat` | **Environment check**: Python version, Resolve, Edge, course files and port, with a Chinese report |
 | `_find_python.bat` | Shared interpreter discovery used by all `.bat` files (portable → py 3.11 → 3.10 → common folders → PATH) |
@@ -142,6 +143,9 @@ Double-click **`start.bat`** — that's it.
 
 - The backend runs **silently in the background with no console window**; its log goes to `.runtime/server.log`.
 - The overlay window appears a moment later. **Closing the overlay shuts the backend down automatically** — no leftover process holding the port.
+- If the port from `config.json` happens to be taken by another program, the plugin **switches to a
+  free port automatically** (the startup log names it) with no impact on use; double-clicking
+  `start.bat` again keeps only one instance.
 
 Or manually, in two steps (useful for debugging; the backend then stays visible and does not exit with the overlay):
 ```bat
@@ -354,12 +358,38 @@ elliptical 3 / bodyweight 5).
   3. **The timeline name does not match any course name** — the panel matches by name; rename the
      timeline to the course name (with the equipment prefix it is safer, e.g.
      `爬楼机-20min心肺间歇突破攀登`).
+- **The timeline shows a small gear icon next to its name and the plugin can no longer find the
+  course**: an old-version bug, **fixed** — just download the latest version, no settings to
+  change. When you create a timeline with *Use Project Settings* unchecked, Resolve's playhead
+  still reports an **absolute** timecode while the course data starts from zero. The timeline's
+  start is then typically `01:00:00:00` rather than `00:00:00:00`, so the old version looked up
+  the course an hour off and could never match, leaving the panel stuck on "waiting for sync".
+  The new version reads that timeline's **own start timecode and frame rate** and converts to
+  "seconds since the course start" before matching; the panel status bar marks *"start aligned"*
+  and `检查环境.bat` prints both the timeline start and the resulting in-course position.
+- **`start.bat` pops up "backend failed to start: port already in use"**: an old-version bug,
+  **fixed**. The plugin used a fixed port, and a TIME_WAIT socket left behind by the previous
+  session could stop the new process from binding — sometimes even after a reboot. Startup now
+  **probes whether anything is actually listening** on the port first: if so it automatically
+  moves to a free port (and tells you which), TIME_WAIT is no longer misjudged, and on exit the
+  backend is reaped **by process tree** so no orphan keeps the port. Download the latest version.
+- **Could the plugin clash with the Edge I already have open, or close my browser on exit?**
+  No. The overlay runs on a **separate Edge profile** (`.runtime\edge-profile`), fully isolated
+  from your everyday browsing — your tabs are untouched — and on exit it closes only its own
+  window, after verifying it really belongs to the plugin. (The old version closed windows by
+  title, which could in theory hit the wrong one.)
 
 **While running**
 
 - **Overlay shows "cannot connect to service"**: run `server.py` first.
 - **Status stuck on "connecting to Resolve"**: make sure Resolve is running and external scripting is set to Local.
 - **Cannot find a matching course**: check that `course_name` matches the timeline name (or contains it).
+- **Status bar says "synced · course finished"**: the playhead has moved past the course's **total
+  length** — this is a normal notice (e.g. while checking the closing shots). Scrub back inside
+  the course and the current segment reappears.
+- **Status bar shows "start aligned"**: this timeline does not start at `00:00:00:00` (the one you
+  built with *Use Project Settings* unchecked); the plugin has already converted the timecode to
+  "time since the course start".
 - **Don't want it on top**: click the pin button in the top-left corner (the choice is remembered;
   delete `.runtime/topmost.json` to fall back to `always_on_top`).
 - **The panel freezes for a second while scrubbing the timeline**: expected. DaVinci does not
@@ -376,6 +406,7 @@ elliptical 3 / bodyweight 5).
 
 This project follows [Semantic Versioning](https://semver.org/).
 
+- **v0.7.0** — **Fixes three things: "port already in use" popping up on its own, a process tree that never fully exits, and custom-start timecodes that could not find the course.** (1) **Timeline start alignment**: Resolve's playhead reports an *absolute* timecode; when a timeline is created with *Use Project Settings* unchecked (a small gear icon appears next to its name) the start is usually `01:00:00:00` rather than `00:00:00:00`, so the old version looked the course up an hour off and could never match — the panel stayed on "waiting for sync". The new version reads that timeline's **own start timecode and frame rate** and converts to *seconds since the course start* before matching; it also handles drop-frame timecodes (`;`) and shows "course finished" instead of silently failing when the playhead runs past the course length. (2) **No clashing with your own Edge**: the overlay now uses a **separate Edge profile** (`.runtime\edge-profile`) fully isolated from everyday browsing, and on exit it no longer closes windows by title but identifies its own by **process tree plus its dedicated profile**, so your tabs are never touched. (3) **No more "port already in use"**: previously a fixed port plus a leftover TIME_WAIT socket could block the new process — even after a reboot; startup now **probes for a live listener** and automatically moves to a free port (written to `.runtime\server.json` so the frontend follows). Also adds a **parent-process watchdog** (the backend exits when the launcher disappears), **child-worker registration and cleanup** (no orphan workers holding the port), a **BrokenPipe guard** in the launcher, and a new `version.py` — the version number now appears in the startup log, the failure dialog, the health report and `/diag`, so a reported problem can be matched to a version at a glance.
 - **v0.6.0** — **A hand-edited `config.json` can no longer kill the plugin, and the health report stops guessing.** (1) New `config_io.py`: UTF-8-with-BOM, ANSI/GBK, trailing commas, `//` comments, an **unquoted value**, and single-backslash paths (including the silent `\t`/`\n`/`\b` escape corruption) are all repaired automatically; what cannot be repaired degrades to defaults and surfaces *"config.json has a syntax error (line N)"* in the overlay status bar, where the old version simply crashed the backend — which looked exactly like *"waiting for DaVinci…"* even though the path had been filled in. (2) Health item 【3】 now reads the Resolve **window title** to tell the free edition from Studio (only Studio's title says "Studio") and prints the **full path of the running `Resolve.exe`**, failing outright when that is not the copy the plugin picked — previously invisible when two installs coexist. (3) Health item 【4】, on a failed connection, lists the registered security software and quotes Resolve's own log line *"Failed to connect to script server"* — the request arrived, Resolve's internal script channel did not come up; unrelated to which drive the plugin lives on or which Python it uses. Also fixes garbled Chinese in the `start.bat` failure dialog (`PYTHONIOENCODING` does not reach `multiprocessing` workers; the fix moved into `server.py` at module level).
 - **v0.5.0** — **"It won't connect / won't sync" is no longer guesswork:** the environment check gained item **[3] "live Resolve connection test"** (spawns a subprocess that really calls `scriptapp("Resolve")` and reports the current project / timeline / whether a course matches), the port check now asks the running backend what *it* sees, and the backend gained a `/diag` endpoint plus self-reported instance info (PID, start time, code dir, data dir) so a stale instance from *another folder* is obvious. Also documents the key prerequisite that **external scripting is Studio-only since Resolve 19.1** (the free edition cannot work).
 - **v0.4.1** — **Works no matter where Resolve is installed:** previously only a few hard-coded install directories were recognised, and the official `DaVinciResolveScript.py` hard-codes `C:\Program Files\Blackmagic Design\DaVinci Resolve\` for `fusionscript.dll`, so an install on `D:\Software\DaVinci` or `E:\Davinci` could never connect. The plugin now searches in order: running Resolve process → Windows Installer-registered install directories → Start Menu/Desktop shortcuts → common directories on every drive → a depth- and time-limited disk scan, and caches the hit in `.runtime/resolve_paths.json`. Leftover copies of Resolve are disambiguated by the registry-recorded version; the environment report lists every directory tried and how many installs exist; Edge is now located via the registry instead of hard-coded paths. Also fixes two related bugs: "start the plugin before Resolve" could get stuck forever if the DLL was not found at startup, and the not-found error gave no clue about where it had looked.

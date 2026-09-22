@@ -1395,28 +1395,158 @@ class ResolveConnection:
             return None
 
     def current_framerate(self) -> float:
-        """返回当前时间线帧率（fps），用于时间码->秒 的换算。失败返回 25.0。"""
+        """返回当前时间线帧率（fps），用于时间码->秒 的换算。失败返回 25.0。
+
+        先问时间线，时间线问不到再退一步问工程 —— 实际遇到过时间线的
+        timelineFrameRate 读不出来的情况，而工程级那个是有的。
+        """
         tl = self._get_timeline()
-        if not tl:
-            return 25.0
+        if tl:
+            try:
+                setting = tl.GetSetting("timelineFrameRate")
+                if setting:
+                    return float(setting)
+            except Exception:
+                pass
         try:
-            setting = tl.GetSetting("timelineFrameRate")
-            if setting:
-                return float(setting)
+            proj = self._get_project()
+            if proj:
+                setting = proj.GetSetting("timelineFrameRate")
+                if setting:
+                    return float(setting)
         except Exception:
             pass
         return 25.0
 
+    def _get_project(self):
+        """返回当前 Project 对象；没有则 None。"""
+        if not self.resolve:
+            return None
+        try:
+            pm = self.resolve.GetProjectManager()
+            return pm.GetCurrentProject() if pm else None
+        except Exception:
+            return None
+
+    def read_timeline(self) -> dict:
+        """一次把「当前时间线」的所有读数取回来。
+
+        返回 dict：
+            name           时间线名（用于匹配课件）
+            timecode       播放头时间码（**绝对**时间码，例如 "01:00:12:30"）
+            start_timecode 时间线起始时间码（例如 "00:00:00:00" 或 "01:00:00:00"）
+            fps            时间线帧率
+            custom         这条时间线是不是「不用项目设置」的自定义设置
+                           （媒体池里名字旁边带小齿轮的那种）
+
+        为什么要合成一次调用：
+            1) worker 是 0.1 秒一轮的循环，fusionscript 每次调用都要过一遍原生
+               边界，能少一次是一次；
+            2) 更重要的是**一致性** —— 分四次调用期间用户切了时间线，就会拿到
+               「A 时间线的名字 + B 时间线的时间码」这种自相矛盾的组合。
+
+        绝不抛异常：任何一项读不到就用安全默认值（空串 / 25.0 / False）。
+        """
+        out = {
+            "name": "",
+            "timecode": "",
+            "start_timecode": "",
+            "fps": 25.0,
+            "custom": False,
+        }
+        tl = self._get_timeline()
+        if not tl:
+            return out
+
+        def _get(fn, default=None):
+            try:
+                v = fn()
+            except Exception:
+                return default
+            return default if v is None else v
+
+        out["name"] = str(_get(lambda: tl.GetName(), "") or "")
+        out["timecode"] = str(_get(lambda: tl.GetCurrentTimecode(), "") or "")
+        try:
+            v = _get(lambda: tl.GetSetting("timelineFrameRate"), None)
+            if v:
+                out["fps"] = float(v)
+        except (TypeError, ValueError):
+            pass
+        out["start_timecode"] = str(_get(lambda: tl.GetStartTimecode(), "") or "")
+        custom = _get(lambda: tl.GetSetting("useCustomSettings"), None)
+        out["custom"] = str(custom).strip() not in ("", "0", "false", "False", "None")
+        return out
+
 
 def timecode_to_seconds(tc: str, fps: float = 25.0) -> float:
-    """把 "HH:MM:SS:FF" 时间码转成秒。非丢帧时间码。"""
+    """把 "HH:MM:SS:FF" 时间码转成秒。
+
+    支持两种写法：
+        "00:01:23:14"   非丢帧（默认）
+        "00:01:23;14"   丢帧（分号是达芬奇/广播行业表示丢帧的写法）
+
+    丢帧不处理的话，29.97/59.94 的项目里每小时会差出 3.6 秒 —— 对「当前环节
+    还有几秒」这种提示来说就不准了，所以这里按标准公式补回来。
+    解析不出来（空值、格式怪）一律返回 0.0，绝不抛异常 —— 这个函数在 worker
+    的 0.1 秒循环里跑，抛一次异常就会让悬浮窗整块黑掉。
+    """
+    if tc is None:
+        return 0.0
+    tc = str(tc).strip()
     if not tc:
         return 0.0
-    parts = tc.split(":")
-    if len(parts) == 4:
-        h, m, s, f = parts
-        return int(h) * 3600 + int(m) * 60 + int(s) + int(f) / fps
-    if len(parts) == 3:
-        h, m, s = parts
-        return int(h) * 3600 + int(m) * 60 + float(s)
-    return 0.0
+    drop = ";" in tc
+    parts = tc.replace(";", ":").split(":")
+    try:
+        if len(parts) == 4:
+            h, m, s, f = (int(p) for p in parts)
+        elif len(parts) == 3:
+            h, m, s = (int(p) for p in parts)
+            f = 0
+        else:
+            return 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+    if not drop:
+        return h * 3600 + m * 60 + s + (f / fps if fps else 0.0)
+
+    # 丢帧：标称帧率取 30 或 60，每分钟丢 2/4 帧（第 10 分钟不丢）
+    nominal = 60 if fps > 45 else 30
+    drop_per_min = nominal // 15
+    total_min = h * 60 + m
+    dropped = drop_per_min * (total_min - total_min // 10)
+    frames = ((h * 3600 + m * 60 + s) * nominal + f) - dropped
+    real_fps = nominal * 1000.0 / 1001.0
+    return frames / real_fps
+
+
+def relative_seconds(tc: str, start_tc: str, fps: float) -> float:
+    """把「达芬奇的绝对时间码」换算成「相对时间线起点的秒」。
+
+    **这是「不勾『使用项目设置』的时间线抓不到课件」的修复点。**
+
+    达芬奇的播放头时间码是**绝对**的：时间线从哪儿开始，它就从哪儿数。而课件
+    数据（data/*.json）永远从 0 秒记起。两者差一个「起始时间码」：
+
+        · 勾了「使用项目设置」的时间线 → 继承工程的起始时间码（多数工程是
+          00:00:00:00）→ 差值 0，以前一直是对的，所以没暴露过；
+        · 没勾「使用项目设置」的时间线 → 用对话框里那个起始时间码，默认
+          01:00:00:00 → 播放头一开就是 "01:00:00:00"，换算出来 t≈3600 秒，
+          早就超出课件总时长（20~35 分钟）→ 所有环节/指标都查不到 →
+          悬浮窗看起来就是「抓不到课件」。
+
+    减去起始时间码之后，两种时间线都对得上；结果钳到 >= 0，避免播放头停在
+    起点之前（或时间码读不到）时出现负数。
+    """
+    if not tc:
+        return 0.0
+    t = timecode_to_seconds(tc, fps)
+    base = timecode_to_seconds(start_tc, fps) if start_tc else 0.0
+    # 容错：起始时间码解析失败（0.0）而播放头明显是个大数（>1 小时）时，
+    # 宁可相信播放头本身是相对值，也不要凭空减去一个 0。
+    rel = t - base
+    if rel < 0:
+        rel = 0.0
+    return rel
